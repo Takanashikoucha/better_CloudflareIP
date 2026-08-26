@@ -305,6 +305,7 @@ class FastCFHandler(BaseHTTPRequestHandler):
                     continue
                 if item is None:
                     break
+                rep = pools.pool_report()
                 state = {
                     "type": "state",
                     "running": item.get("running"),
@@ -313,6 +314,10 @@ class FastCFHandler(BaseHTTPRequestHandler):
                     "detail": item.get("detail"),
                     "elapsed": item.get("elapsed"),
                     "logs": item.get("logs", []),
+                    # 池统计随状态流实时下发（否则前端 30s 定时刷新会让池数"卡住"，
+                    # 后台填充入池时界面上看不出来）
+                    "pool_dc": len(rep),
+                    "pool_ips": sum(rep.values()),
                 }
                 self.wfile.write(b"data: " + json.dumps(state, ensure_ascii=False).encode() + b"\n\n")
                 self.wfile.flush()

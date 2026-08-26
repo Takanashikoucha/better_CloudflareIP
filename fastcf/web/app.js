@@ -116,7 +116,9 @@ function initControls() {
 
   // IP 池 / 信息弹窗
   $("#btnPools").onclick = openPools;
-  $("#btnClosePools").onclick = () => $("#poolsModal").style.display = "none";
+  $("#btnClosePools").onclick = closePools;
+  // 点击遮罩关闭面板（与按钮等价，需停掉自动刷新）
+  $("#poolsModal").addEventListener("click", (e) => { if (e.target === e.currentTarget) closePools(); });
   $("#btnInfo").onclick = openInfo;
   $("#btnCloseInfo").onclick = () => $("#infoModal").style.display = "none";
   $("#btnPoolAdd").onclick = poolAdd;
@@ -211,6 +213,10 @@ function onState(d) {
   $("#stageFill").style.width = d.pct + "%";
   $("#stageDetail").textContent = d.detail || "";
   $("#stageElapsed").textContent = "耗时 " + (d.elapsed || 0) + "s";
+  // 池统计实时刷新（SSE 每 ~1.5s 下发一次，状态栏立即反映后台填充入池）
+  if (d.pool_ips != null) {
+    $("#stPool").textContent = `池 ${d.pool_dc} 节点 / ${d.pool_ips} IP`;
+  }
   // 日志：只追加新增行
   const logs = d.logs || [];
   const box = $("#logBox");
@@ -389,11 +395,21 @@ function toast(msg) {
 }
 
 /* ── IP 池管理 ── */
-async function openPools() {
+let poolsTimer = null;  // 面板打开期间的自动刷新
+function openPools() {
   $("#poolsModal").style.display = "";
-  await loadPools();
+  loadPools();
+  // 后台填充每 10s 左右一轮，面板打开期间每 5s 自动刷新，让入池"看得见"
+  clearInterval(poolsTimer);
+  poolsTimer = setInterval(loadPools, 5000);
+}
+function closePools() {
+  $("#poolsModal").style.display = "none";
+  clearInterval(poolsTimer);
+  poolsTimer = null;
 }
 async function loadPools() {
+  if ($("#poolsModal").style.display !== "") return;  // 面板未打开时跳过（定时器可能仍在跑）
   const list = await fetch("/api/pools").then(r => r.json()).catch(() => []);
   const el = $("#poolList");
   el.innerHTML = "";

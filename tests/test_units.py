@@ -79,6 +79,23 @@ def test_pools():
     assert pools.get("LAX") == []
 
 
+def test_pool_cap_no_bloat():
+    # 池上限 POOL_SIZE(50) 防大小爆炸：
+    # ① 单批超量只保留最新 50（保留尾部，丢弃头部）
+    big = [f"9.9.9.{i}" for i in range(pools.POOL_SIZE + 30)]
+    pools.add("SFO", big)
+    assert pools.size("SFO") == pools.POOL_SIZE
+    assert pools.get("SFO") == big[-pools.POOL_SIZE:]
+    # ② 多批持续追加仍恒为 50（后台填充每轮 ~200 IP 连续追加）
+    for _ in range(5):
+        pools.add("SFO", [f"9.9.8.{i}" for i in range(pools.POOL_SIZE)])
+    assert pools.size("SFO") == pools.POOL_SIZE
+    # ③ 持久化文件里也只有 50 个（不会膨胀落盘）
+    data = json.loads(pools.POOL_FILE.read_text())
+    assert len(data["pools"]["SFO"]["ips"]) == pools.POOL_SIZE
+    pools.clear_all()
+
+
 def test_expired():
     pools.clear_all()
     pools.add("LAX", ["1.1.1.1"])
