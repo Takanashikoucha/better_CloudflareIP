@@ -223,6 +223,20 @@ class Scanner:
         if not ping_results:
             return self._finish_error("所有 IP ping 失败（网络可能异常或被拦截）")
 
+        # 丢包严重的 IP 从池子剔除（4 次拨号全丢包 = 大概率已失效，留着浪费池容量）
+        bad_ips = [r["ip"] for r in ping_results if r["loss"] >= 0.75]
+        if bad_ips:
+            # 按池归属批量剔除：IP 在哪个 DC 的池里就删哪个
+            removed_any = False
+            for dc in pools.all_codes():
+                pool_ips = set(pools.get(dc))
+                bad_in_dc = [ip for ip in bad_ips if ip in pool_ips]
+                if bad_in_dc:
+                    pools.remove(dc, bad_in_dc)
+                    removed_any = True
+            if removed_any:
+                self.log(f"ping 丢包 ≥75%：从池中剔除 {len(bad_ips)} 个失效 IP")
+
         # 过滤：平均时延 > 2× 最佳时延 的淘汰（丢包严重的保留最低延迟者除外）
         best_ping = min(r["ping"] for r in ping_results)
         filtered = [r for r in ping_results
