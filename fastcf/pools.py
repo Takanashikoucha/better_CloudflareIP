@@ -334,6 +334,105 @@ def _fill_subnet_batch(subnets: list, use_v6: bool, use_tls: bool,
     return by_colo
 
 
+def full_subnets(use_v6: bool = False) -> list:
+    """枚举官方 IP 段下全部 /24（v4）或 /48（v6）子网（去重、有序）。"""
+    raw = ipdata.fetch_cf_ips()
+    cidrs = raw["v6"] if use_v6 else raw["v4"]
+    target_plen = 48 if use_v6 else 24
+    seen = set()
+    out = []
+    for c in cidrs:
+        try:
+            net = ipaddress.ip_network(c, strict=False)
+        except ValueError:
+            continue
+        if net.version != (6 if use_v6 else 4):
+            continue
+        if net.prefixlen <= target_plen:
+            subs = [net] if net.prefixlen == target_plen else list(net.subnets(new_prefix=target_plen))
+        else:
+            subs = [net]
+        for s in subs:
+            k = str(s)
+            if k not in seen:
+                seen.add(k)
+                out.append(k)
+    return out
+
+
+def full_sweep(use_v6: bool = False, use_tls: bool = True,
+               ips_per_subnet: int = 10, workers: int = 8, pause: float = 0.2,
+               stop: "callable | None" = None, log=None) -> dict:
+    """子网级全量遍历：枚举全部官方子网，每子网探 1 个代表 IP 读实际 colo，
+    命中则把同子网 ~ips_per_subnet 个邻居批量入池。
+
+    温和节奏：workers 并发 + 批间 pause 秒。返回
+    {total, ok, failed, by_colo, elapsed}。
+    """
+    import concurrent.futures as cfu
+
+    all_subnets = full_subnets(use_v6)
+    total = len(all_subnets)
+    if log:
+        log(f"全量子网遍历开始：共 {total} 个 {'/48' if use_v6 else '/24'} 子网"
+            f"（{workers} 并发，每子网探 1 个代表 IP）")
+
+    random.shuffle(all_subnets)
+    by_colo: dict = {}
+    lock = threading.Lock()
+    done = 0
+    ok = 0
+    failed = 0
+    t0 = time.time()
+
+    def probe_subnet(subnet_str):
+        """探测一个子网：取 1 个代表 IP → 读实际 colo → 成功则随机取同子网邻居批量返回。"""
+        try:
+            net = ipaddress.ip_network(subnet_str, strict=False)
+        except Exception:
+            return None
+        hosts = list(net.hosts())
+        if not hosts:
+            return None
+        test_ip = str(random.choice(hosts))
+        _ip, colo, _err = _probe(test_ip, use_tls)
+        if not colo:
+            return None
+        n = min(ips_per_subnet, len(hosts))
+        ips = [str(h) for h in random.sample(hosts, n)]
+        return subnet_str, colo, ips
+
+    with cfu.ThreadPoolExecutor(max_workers=workers) as ex:
+        futs = {ex.submit(probe_subnet, s): s for s in all_subnets}
+        for f in cfu.as_completed(futs):
+            if stop and stop():
+                break
+            r = f.result()
+            done += 1
+            if r:
+                _subnet, colo, ips = r
+                ok += 1
+                with lock:
+                    if size(colo) < POOL_SIZE:
+                        add(colo, ips, save=False)
+                    by_colo.setdefault(colo.upper(), []).extend(ips)
+            else:
+                failed += 1
+            if done % 100 == 0 or done == total:
+                if log:
+                    log(f"全量遍历：{done}/{total}（命中 {ok} · 无响应 {failed}）")
+            if done % 400 == 0 and pause:
+                time.sleep(pause)
+    _save()
+    elapsed = time.time() - t0
+    hit = len(by_colo)
+    if log:
+        log(f"全量遍历完成：{done}/{total} 子网，命中 {ok} 个（覆盖 {hit} 个 DC），"
+            f"无响应 {failed}，用时 {elapsed:.0f}s")
+    return {"total": total, "ok": ok, "failed": failed,
+            "by_colo": by_colo, "elapsed": elapsed}
+
+
 def refill(codes: list | None = None, use_v6: bool = False, use_tls: bool = True,
            max_probes: int = 200, stop: "callable | None" = None, log=None) -> dict:
     """按子网采样官方 IP 段 → 并发探测 → 按实际 DC 批量入池。

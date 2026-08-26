@@ -229,6 +229,23 @@ input[type="number"]:focus, select:focus { border-color: var(--accent); }
 .logbox .line.error { color: var(--red); }
 .logbox .ts { opacity: .55; margin-right: 6px; }
 
+/* ── 全量遍历横幅 ── */
+.sweep-banner {
+  border: 1px solid rgba(251,191,36,.4);
+  background: linear-gradient(135deg, rgba(251,191,36,.08), rgba(56,189,248,.06));
+}
+[data-theme="dark"] .sweep-banner {
+  border-color: rgba(251,191,36,.35);
+}
+.sweep-head {
+  display: flex; align-items: center; gap: 12px; margin-bottom: 12px;
+}
+.sweep-ico { font-size: 26px; }
+.sweep-head b { font-size: 15px; display: block; }
+.sweep-head .hint { margin: 0; }
+.sweep-elapsed { margin-left: auto; font-family: Menlo, monospace; font-size: 12px; color: var(--dim); white-space: nowrap; }
+.sweep-bar { margin-bottom: 0; }
+
 /* ── 选项卡 ── */
 .tabbar { display: flex; gap: 8px; margin-bottom: 16px; }
 .tabbar button {

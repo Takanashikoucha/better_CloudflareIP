@@ -144,9 +144,19 @@ class Scanner:
         min_speed = max(0.0, min(10000.0, float(p.get("minSpeed", 0) or 0)))
 
         self.set_progress("prepare", 5, "准备中")
-        self.log(f"开始扫描：{'IPv6' if use_v6 else 'IPv4'} | TLS={'开' if use_tls else '关'} | "
+        self.log(f"开始扫描：{'IPv6' if use_v6 else 'IPv4'} | "
+                  f"TLS={'开' if use_tls else '关'} | "
                  f"测速={speed_secs:.0f}s/{speed_mb}MB"
                  f"{' | 速度下限 ' + format(min_speed, 'g') + 'Mbps' if min_speed > 0 else ''} | 返回 Top{count}")
+
+        # 闸门：首次全量子网遍历完成前禁止测速（后台正在建 IP 池）
+        f = filler.start()
+        sw = f.status()
+        if not sw.get("done"):
+            self._finish_error(
+                "首次全量子网遍历进行中（后台建池），完成前无法测速。"
+                f"当前进度：{sw.get('detail') or '启动中'}")
+            return
 
         filler.scan_started()
         try:

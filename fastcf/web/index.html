@@ -38,6 +38,19 @@
     <span id="stColo" class="st-item"></span>
   </div>
 
+  <!-- 全量遍历进度横幅（首次遍历完成前显示，完成前禁止测速） -->
+  <div class="card sweep-banner" id="sweepBanner" style="display:none">
+    <div class="sweep-head">
+      <span class="sweep-ico">🌍</span>
+      <div>
+        <b id="sweepTitle">全量子网遍历中</b>
+        <span class="hint" id="sweepDetail" style="margin:2px 0 0"></span>
+      </div>
+      <span class="sweep-elapsed" id="sweepElapsed"></span>
+    </div>
+    <div class="stagebar sweep-bar"><div class="fill" id="sweepFill"></div></div>
+  </div>
+
   <!-- 扫描设置 -->
   <div class="card" id="settingsCard">
     <h3><span class="dot"></span>扫描设置</h3>

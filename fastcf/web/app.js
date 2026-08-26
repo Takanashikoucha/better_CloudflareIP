@@ -19,6 +19,8 @@ let lastResultSource = "latest";  // "latest" | {id} — 当前展示结果对�
 let sse = null;
 let logN = 0;
 let resSortKey = "ping";
+let sweepTimer = null;   // 全量遍历状态轮询
+let sweepDone = null;    // 首次遍历是否完成
 const state = {
   ipVer: "v4",
   tls: true,
@@ -263,6 +265,10 @@ function params() {
   };
 }
 async function startScan() {
+  // 闸门：首次遍历未完成时直接提示
+  if (sweepDone === false) {
+    return toast("首次全量子网遍历进行中，完成前无法测速");
+  }
   const p = params();
   const ok = await fetch("/api/scan", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(p) });
   const r = await ok.json();
@@ -271,8 +277,14 @@ async function startScan() {
   openSSE();
 }
 function setRunningUI(on) {
-  $("#btnScan").disabled = on;
-  $("#btnScan").textContent = on ? "⏳ 扫描中..." : "🚀 开始优选";
+  const btn = $("#btnScan");
+  if (on) {
+    btn.disabled = true;
+    btn.textContent = "⏳ 扫描中...";
+  } else {
+    // 扫描结束后恢复按钮状态（受遍历闸门约束）
+    syncScanGate();
+  }
   $("#btnCancel").style.display = on ? "" : "none";
   if (on) $("#progressCard").scrollIntoView({ behavior: "smooth", block: "center" });
 }
@@ -473,6 +485,55 @@ async function poolAdd() {
   }
 }
 
+/* ── 全量遍历进度横幅（首次遍历完成前禁止测速） ── */
+function parseSweepDetail(detail) {
+  // 解析 "全量遍历：1234/5956（命中 567 · 无响应 667）" → {done:1234, total:5956, ok:567}
+  if (!detail) return null;
+  const m = String(detail).match(/(\d+)\/(\d+)/);
+  if (!m) return null;
+  const mo = String(detail).match(/命中 (\d+)/);
+  return { done: parseInt(m[1], 10), total: parseInt(m[2], 10), ok: mo ? parseInt(mo[1], 10) : 0 };
+}
+function updateSweepBanner(sw) {
+  const banner = $("#sweepBanner");
+  if (!sw) return;
+  if (sw.done) {
+    banner.style.display = "none";
+    if (sweepDone !== true) {
+      sweepDone = true;
+      toast("✔ 全量子网遍历完成，测速已解锁");
+      syncScanGate();
+    }
+    return;
+  }
+  // 遍历进行中
+  if (sweepDone !== false) {
+    sweepDone = false;
+    syncScanGate();
+  }
+  banner.style.display = "";
+  const p = parseSweepDetail(sw.detail);
+  const pct = p && p.total ? Math.min(100, Math.round(p.done * 100 / p.total)) : 0;
+  $("#sweepFill").style.width = pct + "%";
+  $("#sweepDetail").textContent = sw.detail ? `进度 ${sw.detail}` : "正在枚举官方子网…";
+  // 已耗时
+  const start = sw.started ? new Date(sw.started * 1000) : null;
+  $("#sweepElapsed").textContent = start ? "已运行 " + Math.round((Date.now() - start) / 1000) + "s" : "";
+}
+function syncScanGate() {
+  // 首次遍历完成前禁用「开始优选」
+  const btn = $("#btnScan");
+  if (sweepDone === false) {
+    btn.disabled = true;
+    btn.textContent = "🌍 遍历中，完成前不可测速";
+    btn.title = "首次全量子网遍历进行中，完成前无法测速";
+  } else if (sweepDone === true) {
+    btn.disabled = false;
+    btn.textContent = "🚀 开始优选";
+    btn.title = "";
+  }
+}
+
 /* ── 状态栏 / 系统信息 ── */
 async function loadStatus() {
   const s = await fetch("/api/data-status").then(r => r.json()).catch(() => null);
@@ -484,6 +545,7 @@ async function loadStatus() {
   $("#stXdb").textContent = "CF 段缓存 " + (s.cf_cache ? mb(s.cf_cache) : "未缓存");
   $("#stPool").textContent = `池 ${s.pool_dc} 节点 / ${s.pool_ips} IP` + (s.pool_expired ? "（待重探）" : "");
   $("#stColo").textContent = `colo 表 ${s.colo_count} 节点 · Py ${s.python}`;
+  if (s.sweep) updateSweepBanner(s.sweep);
 }
 async function openInfo() {
   const s = await fetch("/api/data-status").then(r => r.json()).catch(() => ({}));
@@ -509,10 +571,21 @@ initControls();
 (async () => {
   const s = await fetch("/api/status").then(r => r.json()).catch(() => ({}));
   if (s.result) { lastResultSource = "latest"; showResults(s.result); }
+  if (s.sweep) updateSweepBanner(s.sweep);
   loadHistory();
   loadColos();
   loadStatus();
   // 定期刷新 DC 池数量与状态栏
   setInterval(loadColos, 30000);
   setInterval(loadStatus, 30000);
+  // 全量遍历完成前：每 2s 轮询状态（进度条实时）；完成后停止轮询
+  sweepTimer = setInterval(async () => {
+    const st = await fetch("/api/data-status").then(r => r.json()).catch(() => null);
+    if (!st) return;
+    if (st.sweep) updateSweepBanner(st.sweep);
+    if (st.sweep && st.sweep.done) {
+      clearInterval(sweepTimer);
+      sweepTimer = null;
+    }
+  }, 2000);
 })();
