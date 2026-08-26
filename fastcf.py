@@ -35,8 +35,7 @@ def main():
     if args.data_dir:
         os.environ["FASTCF_HOME"] = os.path.abspath(args.data_dir)
 
-    port = server.find_free_port(args.port or None, host=args.host)
-    srv = server.run_server(args.host, port)
+    srv, port = server.start(args.host, args.port)
     url = f"http://{args.host}:{port}"
 
     # 后台预热：刷新 colo 参考数据 → 启动常驻 IP 池填充线程

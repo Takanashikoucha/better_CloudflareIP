@@ -348,3 +348,9 @@ def run_server(host: str, port: int) -> ThreadingHTTPServer:
     server = ThreadingHTTPServer((host, port), FastCFHandler)
     server.daemon_threads = True
     return server
+
+
+def start(host: str, port: int = 0) -> tuple[ThreadingHTTPServer, int]:
+    """启动监听并返回 (server, 实际端口)。port=0 自动分配；监听失败抛 OSError。"""
+    port = find_free_port(port or None, host=host)
+    return run_server(host, port), port

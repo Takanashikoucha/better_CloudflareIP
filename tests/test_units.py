@@ -10,6 +10,7 @@ import os
 import sys
 import tempfile
 import time
+from pathlib import Path
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 os.environ["FASTCF_HOME"] = tempfile.mkdtemp(prefix="fastcf-test-")
@@ -183,6 +184,30 @@ def test_imports():
     import fastcf.scanner
     import fastcf.server
     assert fastcf.scanner.PING_TIMES == 4
+    # 时延口径统一走 TCP+TLS 拨号辅助函数（不手写位运算/握手状态机）
+    assert callable(fastcf.scanner._tcp_tls_ms)
+
+
+def test_sample_cf_subnets_small_prefix():
+    # 回归：CF 官方段中存在比目标更小的子网（如 IPv6 的 /56 段），
+    # 旧实现中 `continue` 紧跟在 `blocks.append(net)` 之后，小段被静默丢弃。
+    import tempfile
+    with tempfile.TemporaryDirectory() as d:
+        p = os.path.join(d, "cf_ips.json")
+        with open(p, "w") as f:
+            json.dump({
+                "ts": time.time(),
+                "v4": ["192.0.2.0/24", "198.51.100.0/28"],   # /28 更小，必须保留
+                "v6": ["2001:db8::/48"],
+            }, f)
+        p_old = ipdata.CF_IPS_CACHE
+        ipdata.CF_IPS_CACHE = Path(p)
+        try:
+            subs = ipdata.sample_cf_subnets(10, use_v6=False)
+        finally:
+            ipdata.CF_IPS_CACHE = p_old
+        assert len(subs) == 2, subs
+        assert "198.51.100.0/28" in subs, "更小子网不应被丢弃"
 
 
 if __name__ == "__main__":

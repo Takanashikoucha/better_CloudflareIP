@@ -108,7 +108,11 @@ def remove(code: str, ips: list):
 
 
 def expired() -> bool:
-    """池整体是否超过 TTL（过期触发重新探测）。"""
+    """池整体是否超过 TTL（过期触发重新探测）。
+
+    首次建池（_pools_ts 尚为 0，即还没保存过）不视为过期，
+    避免指定 DC 扫描时刚 add 完就触发整池重探。"""
+    _ensure_loaded()
     return bool(_pools_ts) and time.time() - _pools_ts > TTL
 
 

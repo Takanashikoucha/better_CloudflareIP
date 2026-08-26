@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
-"""测速引擎：取池/建池 → ping 预筛选 → 逐节点下载测速 → 按 ping 排名。
+"""测速引擎：取池/建池 → ping 预筛选 → 逐 IP 串行下载测速 → 按 延迟/丢包/速度 排名。
 
-所有网络 I/O 均为直连 socket（模块导入时已清除代理环境变量），
+所有网络 I/O 均为直连 socket（入口脚本导入时已清除代理环境变量），
 不经过任何系统代理。
 """
 import random
@@ -12,12 +12,39 @@ import time
 
 from . import filler, geoip, ipdata, pools
 
-# 每轮扫描最多保留的 RTT 候选数（默认值；可被 params["top_rtt"] 覆盖）
+# 进入第二轮下载测速的候选数（固定 10；候选不足时全部进入）
 TOP_RTT = 10
 # ping 预筛选：每个候选 N 次拨号（对齐 CFST 的 PingTimes=4）
 PING_TIMES = 4
 # ping 预筛选：平均延迟超过 2× 最小时延 的候选直接淘汰
 PING_LAT_FACTOR = 2.0
+
+
+def _tcp_tls_ms(ip: str, port: int, use_tls: bool, timeout: float) -> int:
+    """一次 TCP(+TLS) 拨号时延（ms）；任一步失败返回 0。
+
+    计时口径 = TCP 连接 + TLS 握手 全程（TLS 开启时 TLS 慢不代表节点差），
+    TLS 握手失败不计入 TCP 时延（避免用 TCP 时延冒充「TLS 可用」的节点）。
+    """
+    t0 = time.perf_counter()
+    try:
+        sock = socket.create_connection((ip, port), timeout=timeout)
+    except Exception:
+        return 0
+    try:
+        if use_tls:
+            ctx = ssl.create_default_context()
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
+            sock = ctx.wrap_socket(sock, server_hostname="cloudflare.com")
+        return max(1, int((time.perf_counter() - t0) * 1000))
+    except Exception:
+        return 0
+    finally:
+        try:
+            sock.close()
+        except Exception:
+            pass
 
 
 class Scanner:
@@ -380,62 +407,25 @@ class Scanner:
         for attempt in range(2):
             if self._cancelled():
                 break
-            t0 = time.perf_counter()
-            try:
-                sock = socket.create_connection((ip, port), timeout=1.5)
-            except Exception:
-                if best_ms > 0:
-                    break
-                continue
-            try:
-                if use_tls:
-                    ctx = ssl.create_default_context()
-                    ctx.check_hostname = False
-                    ctx.verify_mode = ssl.CERT_NONE
-                    sock = ctx.wrap_socket(sock, server_hostname="cloudflare.com")
-                if best_ms == 0 or (time.perf_counter() - t0) * 1000 < best_ms:
-                    best_ms = (time.perf_counter() - t0) * 1000
-            except Exception:
-                pass
-            finally:
-                try:
-                    sock.close()
-                except Exception:
-                    pass
+            ms = _tcp_tls_ms(ip, port, use_tls, timeout=1.5)
+            if ms > 0:
+                best_ms = ms if best_ms == 0 else min(best_ms, ms)
             if attempt == 0 and not self._cancelled():
                 time.sleep(0.05)
-        return max(1, int(best_ms)) if best_ms > 0 else 0
+        return best_ms
 
     def _probe_ping_loss(self, ip, use_tls, port, times=PING_TIMES):
         """ping + 丢包率探测：times 次拨号。
-        返回 (avg_ms, loss)：成功连接的 TCP+TLS 握手平均时延；失败次数/times。"""
+        返回 (avg_ms, loss)：拨号成功（TCP+TLS 全程）的平均时延；失败次数/times。"""
         succ = 0
         total_ms = 0.0
         for attempt in range(times):
             if self._cancelled():
                 break
-            t0 = time.perf_counter()
-            try:
-                sock = socket.create_connection((ip, port), timeout=1.5)
-            except Exception:
-                sock = None
-            if sock is None:
-                continue
-            try:
-                if use_tls:
-                    ctx = ssl.create_default_context()
-                    ctx.check_hostname = False
-                    ctx.verify_mode = ssl.CERT_NONE
-                    sock = ctx.wrap_socket(sock, server_hostname="cloudflare.com")
+            ms = _tcp_tls_ms(ip, port, use_tls, timeout=1.5)
+            if ms > 0:
                 succ += 1
-                total_ms += (time.perf_counter() - t0) * 1000
-            except Exception:
-                pass
-            finally:
-                try:
-                    sock.close()
-                except Exception:
-                    pass
+                total_ms += ms
             if attempt < times - 1 and not self._cancelled():
                 time.sleep(0.05)
         loss = (times - succ) / max(1, times)

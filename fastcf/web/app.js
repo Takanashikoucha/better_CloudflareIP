@@ -28,6 +28,7 @@ const state = {
   speedSecs: 8,
   speedMB: 50,
   minSpeed: 0,       // 下载速度下限（Mbps）；>0 时凑够 count 个达标 IP 即停
+  top_rtt: 10,       // ping 预筛选后进入下载测速的候选数
 };
 
 /* ── 主题 ── */
@@ -67,6 +68,7 @@ function initControls() {
   numBind("#inSecs", "speedSecs", 3, 60, 8);
   numBind("#inMB", "speedMB", 10, 1000, 50);
   numBind("#inMinSpeed", "minSpeed", 0, 10000, 0);
+  numBind("#inTopRtt", "top_rtt", 3, 30, 10);
   bindSeg("#segVer", "ipVer");
   // tls 按钮 data-v 是 "1"/"0"，统一存布尔，避免 params() 里再做字符串比较
   bindSeg("#segTls", "tls", v => v === "1");
@@ -251,6 +253,7 @@ function params() {
     speedSecs: state.speedSecs || 8,
     speedMB: state.speedMB || 50,
     minSpeed: state.minSpeed || 0,
+    top_rtt: state.top_rtt || 10,
   };
 }
 async function startScan() {
@@ -295,7 +298,7 @@ function showResults(res) {
       '<td class="ip" title="点击复制 IP">' + esc(r.ip) + (loc ? '<span class="sub">' + esc(loc) + '</span>' : '') + '</td>' +
       '<td>' + esc(dc) + (r.dc && r.dc_zh ? '<span class="sub">CF 机房 ' + esc(r.dc) + '</span>' : '') + '</td>' +
       '<td class="lat">' + (r.latency ?? r.ping ?? 0) + ' <span class="unit">ms</span></td>' +
-      '<td class="loss" style="color:' + (r.loss == null ? "var(--muted)" : (r.loss <= 0.1 ? "var(--green)" : r.loss <= 0.3 ? "var(--accent)" : "var(--red, #e05252)")) + '">' + (r.loss == null ? "—" : Math.round(r.loss * 100) + '<span class="unit">%</span>') + '</td>' +
+      '<td class="loss" style="color:' + (r.loss == null ? "var(--dim)" : (r.loss <= 0.1 ? "var(--green)" : r.loss <= 0.3 ? "var(--yellow)" : "var(--red)")) + '">' + (r.loss == null ? "—" : Math.round(r.loss * 100) + '<span class="unit">%</span>') + '</td>' +
       '<td class="mbps" style="color:' + (bwOk ? "var(--green)" : "var(--accent)") + '">' + (r.mbps || 0) + '<span class="unit">Mbps</span>' + (state.minSpeed > 0 ? '<span class="sub">' + (bwOk ? '≥ 下限 ' + state.minSpeed : '未达下限') + '</span>' : '') + '</td>' +
       '<td><span class="badge ' + (r.tls === false ? "plain" : "tls") + '">' + (r.tls === false ? "HTTP:80" : "TLS:443") + '</span></td>' +
       '<td><button class="rowcopy" title="复制 IP">📋</button></td>';
@@ -354,7 +357,7 @@ async function loadHistory() {
       if (typeof p.colo === "string") { state.colo = p.colo; $("#selDC").value = p.colo || ""; }
       syncCountryChipVisibility();
       if (Array.isArray(p.countries) && p.countries.length) setChips(p.countries);
-      for (const [id, k] of [["#inSecs", "speedSecs"], ["#inMB", "speedMB"], ["#inMinSpeed", "minSpeed"]]) {
+      for (const [id, k] of [["#inSecs", "speedSecs"], ["#inMB", "speedMB"], ["#inMinSpeed", "minSpeed"], ["#inTopRtt", "top_rtt"]]) {
         if (p[k] != null) $(id).value = p[k];
       }
       toast("已载入历史参数");

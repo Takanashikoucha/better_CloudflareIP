@@ -112,7 +112,7 @@ def sample_cf_subnets(count: int, use_v6: bool) -> list:
         if net.version != (6 if use_v6 else 4):
             continue
         if net.prefixlen > target_plen:
-            continue  # 已经是更小的子网，直接当 1 个块
+            # 已经是更小的子网，直接当 1 个块
             blocks.append(net)
         elif net.prefixlen < target_plen:
             blocks.extend(net.subnets(new_prefix=target_plen))
