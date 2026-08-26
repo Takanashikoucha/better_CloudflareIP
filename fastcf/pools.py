@@ -259,45 +259,68 @@ def probe_and_add(ips: list, code_hint: str = "", use_v6: bool = False,
     }
 
 
-def _fill_batch(candidates: list, use_v6: bool, use_tls: bool,
-                stop: "callable | None" = None, log=None) -> dict:
-    """并发探测一批候选 IP，把每个 IP 写回它实际命中的 DC（无目标过滤）。
+def _fill_subnet_batch(subnets: list, use_v6: bool, use_tls: bool,
+                       ips_per_subnet: int = 10,
+                       stop: "callable | None" = None, log=None) -> dict:
+    """按子网（/24 或 /48）并发探测，探测成功后批量加入同子网的邻居 IP。
 
+    同一子网内 CF 通常把连续 IP 分配给同一边缘节点，所以探测一个 IP
+    确认 DC 后，可以直接把同子网的其余 IP 批量入池（它们大概率同 DC）。
     返回 {colo: [ips...]}（本轮入池汇总）。
     """
     import concurrent.futures as cfu
 
-    random.shuffle(candidates)
+    random.shuffle(subnets)
     by_colo: dict = {}
     lock = threading.Lock()
     done = 0
+    total = len(subnets)
 
-    def probe(ip):
-        ip, colo, err = _probe(ip, use_tls)
-        return ip, colo
+    def probe_subnet(subnet_str):
+        """探测一个子网：取一个 IP 探测 → 成功则随机取同子网的邻居 IP 批量返回。"""
+        try:
+            net = ipaddress.ip_network(subnet_str, strict=False)
+        except Exception:
+            return None
+        hosts = list(net.hosts())
+        if not hosts:
+            return None
+        test_ip = str(random.choice(hosts))
+        _ip, colo, err = _probe(test_ip, use_tls)
+        if not colo:
+            return None
+        # 探测成功：随机取同子网的 IP（避免顺序取导致集中在不可达区间）
+        n = min(ips_per_subnet, len(hosts))
+        ips = [str(h) for h in random.sample(hosts, n)]
+        return subnet_str, colo, ips
 
     with cfu.ThreadPoolExecutor(max_workers=FILL_WORKERS) as ex:
-        futs = {ex.submit(probe, ip): ip for ip in candidates}
+        futs = {ex.submit(probe_subnet, s): s for s in subnets}
         for f in cfu.as_completed(futs):
             if stop and stop():
                 break
-            ip, colo = f.result()
+            r = f.result()
             done += 1
-            if done % 10 == 0 and log:
-                log(f"后台填充：已探测 {done}/{len(candidates)}")
-            if not colo:
+            if done % 5 == 0 and log:
+                log(f"后台填充：已探测 {done}/{total} 个子网")
+            if not r:
                 continue
+            _subnet, colo, ips = r
             with lock:
                 if size(colo) < POOL_SIZE:
-                    add(colo, [ip], save=False)
-                by_colo.setdefault(colo.upper(), []).append(ip)
+                    add(colo, ips, save=False)
+                by_colo.setdefault(colo.upper(), []).extend(ips)
     _save()
     return by_colo
 
 
 def refill(codes: list | None = None, use_v6: bool = False, use_tls: bool = True,
            max_probes: int = 200, stop: "callable | None" = None, log=None) -> dict:
-    """采样官方 IP 段 → 并发探测 → 按实际 DC 入池。
+    """按子网采样官方 IP 段 → 并发探测 → 按实际 DC 批量入池。
+
+    利用 CF 同一 /24（v4）或 /48（v6）子网内 IP 通常归属同一 DC 的特性，
+    每个子网只探测一个 IP，成功后把同子网的邻居 IP 批量入池，
+    大幅减少探测次数。
 
     codes 仅用于判断缺额（None = 全部有池的 DC 都算）；
     探测命中的任何 DC 都会入池（含 codes 之外的 DC）。
@@ -314,23 +337,45 @@ def refill(codes: list | None = None, use_v6: bool = False, use_tls: bool = True
             old_ips.extend(get(c))
         if old_ips and log:
             log(f"池已过期，重新探测 {len(old_ips)} 个旧 IP…")
-        # 先清空（保留数据，重探成功会重新写回；失败的即被丢弃）
         with _lock:
             _pools.clear()
             _pool_ts.clear()
-        step = 20
-        for i in range(0, min(len(old_ips), max_probes * 3), step):
+        # 旧 IP 按 /24 分组，每组只探测一个
+        by_subnet: dict = {}
+        for ip in old_ips:
+            try:
+                a = ipaddress.ip_address(ip)
+            except Exception:
+                continue
+            if a.version == 4:
+                key = str(ipaddress.ip_network((int(a) & 0xFFFFFFF0, 24), strict=False))
+            else:
+                key = str(ipaddress.ip_network((int(a) & ~((1 << 80) - 1), 48), strict=False))
+            by_subnet.setdefault(key, []).append(ip)
+        subnet_list = list(by_subnet.keys())
+        random.shuffle(subnet_list)
+        max_subnets = min(len(subnet_list), max_probes)
+        done = 0
+        for subnet_str in subnet_list[:max_subnets]:
             if stop and stop():
                 break
-            batch = _fill_batch(old_ips[i:i + step], use_v6, use_tls, stop, log)
-            for k, v in batch.items():
-                out.setdefault(k, []).extend(v)
+            group = by_subnet[subnet_str]
+            test_ip = random.choice(group)
+            _ip, colo, err = _probe(test_ip, use_tls)
+            done += 1
+            if done % 20 == 0 and log:
+                log(f"重探：{done}/{max_subnets} 个子网")
+            if colo:
+                with _lock:
+                    if size(colo) < POOL_SIZE:
+                        add(colo, group, save=False)
+                out.setdefault(colo.upper(), []).extend(group)
         with _lock:
             if _pools_ts:
                 _pools_ts = time.time()
         _save()
 
-    # 2. 缺额采样补池
+    # 2. 缺额采样补池（按子网）
     if codes is not None:
         need = {c.upper() for c in codes if size(c) < POOL_SIZE}
     else:
@@ -340,14 +385,15 @@ def refill(codes: list | None = None, use_v6: bool = False, use_tls: bool = True
     if stop and stop():
         return out
 
-    want = min(1500, max(100, len(need) * 20))
+    # 每个子网探测 1 个 IP、批量加入 ~10 个邻居，
+    # max_probes 个探测 ≈ max_probes*10 个 IP 入池
     probes_left = max_probes
     while probes_left > 0 and (need and any(size(c) < POOL_SIZE for c in need)):
         if stop and stop():
             break
         n = min(probes_left, 20)
-        candidates = ipdata.sample_cf_ips(n, use_v6)
-        batch = _fill_batch(candidates, use_v6, use_tls, stop, log)
+        subnets = ipdata.sample_cf_subnets(n, use_v6)
+        batch = _fill_subnet_batch(subnets, use_v6, use_tls, stop=stop, log=log)
         probes_left -= n
         for k, v in batch.items():
             out.setdefault(k, []).extend(v)

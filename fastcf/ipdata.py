@@ -85,6 +85,35 @@ def sample_cf_ips(count: int, use_v6: bool) -> list:
     return _expand_sample(cidrs, 6 if use_v6 else 4)[:count]
 
 
+def sample_cf_subnets(count: int, use_v6: bool) -> list:
+    """随机采样 count 个 /24（v4）或 /48（v6）子网。
+
+    返回 [str(ip_network), ...]，每个代表一个 CF 官方 CIDR 下的子网。
+    用于建池：同一子网内 IP 通常归属同一 DC，探测一个即可批量入池。
+    """
+    raw = fetch_cf_ips()
+    cidrs = raw["v6"] if use_v6 else raw["v4"]
+    bit = 32 if not use_v6 else 128
+    host = 24 if not use_v6 else 48
+    step = 1 << (bit - host)
+    mask = step - 1
+
+    blocks = []
+    for c in cidrs:
+        try:
+            net = ipaddress.ip_network(c, strict=False)
+        except ValueError:
+            continue
+        if net.version != (6 if use_v6 else 4):
+            continue
+        first = int(net.network_address) & ~mask
+        last = int(net.broadcast_address)
+        for base in range(first, last + 1, step):
+            blocks.append(ipaddress.ip_network((base, host), strict=False))
+    random.shuffle(blocks)
+    return [str(b) for b in blocks[:count]]
+
+
 def probe_location(ip: str, use_tls=True, timeout=4):
     """
     对单个 IP 发一个极小流量请求（1MB），读 CF 返回的**实际服务地**。
