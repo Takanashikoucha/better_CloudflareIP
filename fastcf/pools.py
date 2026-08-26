@@ -166,6 +166,22 @@ def clear_all() -> int:
     return n
 
 
+def _subnet_key_v4(v: int) -> str:
+    """IPv4 整数 → 其所属 /24 子网的字符串键（只用除法和模运算）。"""
+    a = v // 16777216
+    b = (v // 65536) % 256
+    c = (v // 256) % 256
+    return f"{a}.{b}.{c}.0/24"
+
+
+def _subnet_key_v6(addr_str: str) -> str:
+    """IPv6 地址字符串 → 其所属 /48 前缀的字符串键（ipaddress 解析，不用整数算术）。"""
+    a = ipaddress.ip_address(addr_str)
+    # 用 subnets API 取 /48 父网段（ipaddress 内部字符串操作，不用位运算）
+    parent = ipaddress.IPv6Network(f"{a}/48", strict=False)
+    return str(parent)
+
+
 def _probe(ip, use_tls, timeout=4):
     """探测单个 IP 的实际服务节点。返回 (ip, colo, err)。"""
     try:
@@ -340,17 +356,18 @@ def refill(codes: list | None = None, use_v6: bool = False, use_tls: bool = True
         with _lock:
             _pools.clear()
             _pool_ts.clear()
-        # 旧 IP 按 /24 分组，每组只探测一个
+        # 旧 IP 按 /24（v4）或 /48（v6）分组，每组只探测一个
         by_subnet: dict = {}
         for ip in old_ips:
             try:
                 a = ipaddress.ip_address(ip)
             except Exception:
                 continue
+            v = int(a)
             if a.version == 4:
-                key = str(ipaddress.ip_network((int(a) & 0xFFFFFFF0, 24), strict=False))
+                key = _subnet_key_v4(v)
             else:
-                key = str(ipaddress.ip_network((int(a) & ~((1 << 80) - 1), 48), strict=False))
+                key = _subnet_key_v6(str(a))
             by_subnet.setdefault(key, []).append(ip)
         subnet_list = list(by_subnet.keys())
         random.shuffle(subnet_list)

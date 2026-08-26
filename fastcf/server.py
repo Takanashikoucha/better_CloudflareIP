@@ -9,8 +9,7 @@ from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from . import __version__, exports, geoip, pools, scanner
-from . import filler
+from . import __version__, exports, filler, geoip, pools
 from .scanner import Scanner
 
 WEB_DIR = Path(__file__).parent / "web"
@@ -172,12 +171,12 @@ class FastCFHandler(BaseHTTPRequestHandler):
             out.sort(key=lambda x: x["cc_zh"])
             self._json(out)
         elif path == "/api/export":
-            # ?fmt=csv&source=latest|history&history_id=N
+            # ?fmt=csv|json&source=latest|history&history_id=N
             qs = self.path.split("?", 1)[1] if "?" in self.path else ""
             params = dict(p.split("=", 1) for p in qs.split("&") if "=" in p)
             from urllib.parse import unquote
             params = {k: unquote(v) for k, v in params.items()}
-            fmt = params.get("fmt", "iplist")
+            fmt = params.get("fmt", "csv")
             if fmt not in exports.FORMATS:
                 self._json({"error": f"未知导出格式：{fmt}"}, 400)
                 return
@@ -327,17 +326,21 @@ class FastCFHandler(BaseHTTPRequestHandler):
 
 # ── 启动 ──
 
-def find_free_port(preferred: int | None = None) -> int:
+def find_free_port(preferred: int | None = None, host: str = "127.0.0.1") -> int:
+    """分配监听端口：preferred 非 0 且可用则用之，否则自动选空闲端口。
+    探测时绑定真实监听地址（0.0.0.0 的可用性可能不同于 127.0.0.1）。"""
     import socket
     if preferred:
         try:
             with socket.socket() as s:
-                s.bind(("127.0.0.1", preferred))
+                s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                s.bind((host, preferred))
                 return preferred
         except OSError:
             pass
     with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        s.bind((host, 0))
         return s.getsockname()[1]
 
 

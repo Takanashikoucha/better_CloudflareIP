@@ -56,24 +56,32 @@ def fetch_cf_ips(force=False) -> dict:
 # ── IPv6 前缀工具 ──
 
 def v6_prefixes(net, plen=48):
-    """把 IPv6 网段切成 /plen 前缀。"""
+    """把 IPv6 网段切成 /plen 前缀（如 /32 → 65536 个 /48）。
+
+    用 ipaddress 的 .subnets(new_prefix=) API（C 层字符串操作，
+    不依赖 Python 整数算术——该算术在部分构建下不稳定，见 README「开发」）。
+    """
+    if net.version != 6:
+        raise ValueError(f"v6_prefixes 只接受 IPv6 网段：{net}")
     if plen <= net.prefixlen:
         yield net
         return
-    step = 1 << (plen - net.prefixlen)
-    base = int(net.network_address) & ~((1 << (128 - plen)) - 1)  # 对齐到 plen 边界
-    for i in range(step):
-        yield ipaddress.ip_network((base + i) << (128 - plen), plen)
+    for prefix in net.subnets(new_prefix=plen):
+        yield prefix
 
 
 def v4_prefixes(net, plen=24):
+    """把 IPv4 网段切成 /plen 前缀（如 /8 → 65536 个 /24）。
+
+    实现方式同 v6_prefixes。
+    """
+    if net.version != 4:
+        raise ValueError(f"v4_prefixes 只接受 IPv4 网段：{net}")
     if plen <= net.prefixlen:
         yield net
         return
-    step = 1 << (plen - net.prefixlen)
-    base = int(net.network_address)
-    for i in range(step):
-        yield ipaddress.ip_network((base + i) << (32 - plen), plen)
+    for prefix in net.subnets(new_prefix=plen):
+        yield prefix
 
 
 # ── 采样 ──
@@ -93,10 +101,7 @@ def sample_cf_subnets(count: int, use_v6: bool) -> list:
     """
     raw = fetch_cf_ips()
     cidrs = raw["v6"] if use_v6 else raw["v4"]
-    bit = 32 if not use_v6 else 128
-    host = 24 if not use_v6 else 48
-    step = 1 << (bit - host)
-    mask = step - 1
+    target_plen = 48 if use_v6 else 24
 
     blocks = []
     for c in cidrs:
@@ -106,10 +111,13 @@ def sample_cf_subnets(count: int, use_v6: bool) -> list:
             continue
         if net.version != (6 if use_v6 else 4):
             continue
-        first = int(net.network_address) & ~mask
-        last = int(net.broadcast_address)
-        for base in range(first, last + 1, step):
-            blocks.append(ipaddress.ip_network((base, host), strict=False))
+        if net.prefixlen > target_plen:
+            continue  # 已经是更小的子网，直接当 1 个块
+            blocks.append(net)
+        elif net.prefixlen < target_plen:
+            blocks.extend(net.subnets(new_prefix=target_plen))
+        else:
+            blocks.append(net)
     random.shuffle(blocks)
     return [str(b) for b in blocks[:count]]
 
@@ -174,8 +182,11 @@ def probe_location(ip: str, use_tls=True, timeout=4):
 
 
 def _expand_sample(cidrs, want_ver):
-    """从 CIDR 列表直接采样（不展开全量）：v4 按 /24、v6 按 /48 前缀各取一个随机主机，
-    随机前缀重复取若干轮，保证随机性又避免枚举数百万 IP。"""
+    """从 CIDR 列表直接采样（不展开全量）：v4 按 /24、v6 按 /48 前缀分层，
+    每个前缀块内随机取主机；随机前缀重复取若干轮，保证随机性又避免枚举数百万 IP。
+
+    用 ipaddress 的 .hosts() 生成器取随机主机（C 层字符串操作，不用整数算术）。
+    """
     nets = []
     for c in cidrs:
         try:
@@ -187,24 +198,30 @@ def _expand_sample(cidrs, want_ver):
     if not nets:
         return []
 
-    # 收集前缀块（每个前缀块是 [first, last] 整数区间）；直接整数运算，避免 ip_network 构造
-    bits = 32 if want_ver == 4 else 128
-    host_bits = (24 if want_ver == 4 else 48)
-    mask = (1 << (bits - host_bits)) - 1
+    # 按目标子网分层
+    target_plen = 24 if want_ver == 4 else 48
     blocks = []
     for n in nets:
-        first = int(n.network_address) & ~mask
-        last = int(n.broadcast_address)
-        for base in range(first, last + 1, 1 << (bits - host_bits)):
-            blocks.append((base, min(base + (1 << (bits - host_bits)) - 1, last)))
+        if n.prefixlen > target_plen:
+            blocks.append(n)
+        elif n.prefixlen < target_plen:
+            blocks.extend(n.subnets(new_prefix=target_plen))
+        else:
+            blocks.append(n)
     if not blocks:
         return []
 
+    # 每块随机取 1-3 个主机，重复 3 轮
     ips = []
-    for _ in range(3):  # 3 轮随机前缀
+    for _ in range(3):
         random.shuffle(blocks)
-        for first, last in blocks:
-            ips.append(str(ipaddress.ip_address(first + random.getrandbits(bits) % (last - first + 1))))
-            if len(ips) >= 5000:
-                return ips
+        for net in blocks:
+            hosts = list(net.hosts())
+            if not hosts:
+                continue
+            take = min(3, len(hosts))
+            for h in random.sample(hosts, take):
+                ips.append(str(h))
+                if len(ips) >= 5000:
+                    return ips
     return ips

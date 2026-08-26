@@ -141,7 +141,7 @@
             <th data-k="i">#</th><th data-k="ip">IP 地址</th><th data-k="dc">数据中心</th>
             <th data-k="ping" class="sortable on">ping 延迟</th>
             <th data-k="loss" class="sortable">丢包率</th>
-            <th data-k="mbps" class="sortable">峰值速度</th><th data-k="proto">协议</th><th></th>
+            <th data-k="mbps" class="sortable">峰值速度</th><th data-k="proto" class="sortable">协议</th><th></th>
           </tr></thead>
           <tbody id="resBody"></tbody>
         </table>
@@ -173,7 +173,7 @@
     </div>
     <div class="modal-body">
       <p class="hint" style="margin:0 0 12px">
-        每个 DC（节点）缓存已验证可直连的 IP（上限 100/节点，7 天有效期）。
+        每个 DC（节点）缓存已验证可直连的 IP（上限 50/节点，7 天有效期）。
         扫描成功的 IP 会自动回写；也可手动补充或删除。
         <b>入池时自动探测</b>：先确认 IP 属于 Cloudflare 官方 IP 段，
         再实际拨号读取 CF 返回的 <code>cf-meta-colo</code>，与目标节点不符的 IP 会被拒绝入池。

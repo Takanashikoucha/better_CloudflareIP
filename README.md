@@ -145,6 +145,18 @@ README.md              # 本文档
 - IP 池：`~/.fastcf/ip_pools.json`
 - colo 参考表下载加速源（可选）：`FASTCF_PROXY_BASE` 环境变量，前缀形式（如 `https://your-proxy/`），留空则用 jsDelivr / GitHub raw 直连
 
+## 开发
+
+- 测试：`python3 tests/test_units.py`（离线单元测试，无需网络；用 `FASTCF_HOME` 临时目录隔离数据）。
+- 实现约定：CIDR 切分（`v4_prefixes` / `v6_prefixes` / `sample_cf_subnets` / `_expand_sample`）
+  一律走 `ipaddress` 标准库的字符串 API（`ip_network(str, strict=False)`、`.subnets(new_prefix=)`、
+  `.hosts()`），**不做手写的整数位运算**（`<<`、`>>`、`&`、`~`）。部分 Python 构建下
+  大整数位运算结果不可靠（曾发现 `<<` 与 `>>` 结果相同、`& 0xFFFFFFF0` 间歇性丢失位），
+  交给标准库逐 IP 枚举更安全。
+- `pools._subnet_key_v6` 用 `IPv6Network(f"{ip}/48", strict=False)` 取 /48 父网段作为分组键，
+  同样避免手写位掩码。
+- 版本号单一来源：`fastcf/__init__.py` 的 `__version__`。
+
 ## 许可证
 
 - 本项目代码：MIT（见 [LICENSE](LICENSE)）

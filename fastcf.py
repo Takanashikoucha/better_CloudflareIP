@@ -35,7 +35,7 @@ def main():
     if args.data_dir:
         os.environ["FASTCF_HOME"] = os.path.abspath(args.data_dir)
 
-    port = server.find_free_port(args.port or None)
+    port = server.find_free_port(args.port or None, host=args.host)
     srv = server.run_server(args.host, port)
     url = f"http://{args.host}:{port}"
 
