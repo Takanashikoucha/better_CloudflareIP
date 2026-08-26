@@ -10,6 +10,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from . import __version__, exports, geoip, pools, scanner
+from . import filler
 from .scanner import Scanner
 
 WEB_DIR = Path(__file__).parent / "web"
@@ -153,8 +154,6 @@ class FastCFHandler(BaseHTTPRequestHandler):
             self._json(load_history())
         elif path == "/api/stream":
             self._sse()
-        elif path == "/api/info":
-            self._json({"version": __version__, "running": manager.running})
         elif path == "/api/colos":
             # 国家分组 + 各国家节点列表/IP 池大小，供前端下拉框
             by_cc = geoip.colo_list_by_cc()
@@ -213,17 +212,17 @@ class FastCFHandler(BaseHTTPRequestHandler):
         elif path == "/api/pools":
             self._json(pools.pools_detail())
         elif path == "/api/data-status":
-            # 数据目录 / 地理库 / 池统计 概要，供前端信息栏
+            # 数据目录 / 池统计 概要，供前端信息栏
             d = geoip.DATA_DIR
+            rep = pools.pool_report()
             st = {
                 "version": __version__,
                 "data_dir": str(d),
-                "xdb_v4": d.joinpath("ip2region_v4.xdb").stat().st_size if d.joinpath("ip2region_v4.xdb").exists() else 0,
-                "xdb_v6": d.joinpath("ip2region_v6.xdb").stat().st_size if d.joinpath("ip2region_v6.xdb").exists() else 0,
                 "cf_cache": d.joinpath("cf_ips.json").stat().st_size if d.joinpath("cf_ips.json").exists() else 0,
-                "pool_dc": len(pools.pool_report()),
-                "pool_ips": sum(pools.pool_report().values()),
-                "colo_count": len(geoip.colo_list()),
+                "pool_dc": len(rep),
+                "pool_ips": sum(rep.values()),
+                "pool_expired": pools.expired(),
+                "colo_count": geoip.colo_count(),
                 "running": manager.running,
                 "python": ".".join(str(x) for x in sys.version_info[:3]),
             }

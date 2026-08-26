@@ -23,10 +23,13 @@ CACHE_TTL = 7 * 86400  # 7 天
 
 
 def _direct_download(url, timeout=30):
+    """绕过代理直连下载（socket 级超时，防止慢速连接挂死）。"""
+    import socket
     import urllib.request
     req = urllib.request.Request(url, headers={"User-Agent": "FastCF/1.0"})
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     with opener.open(req, timeout=timeout) as r:
+        r.fp.raw._sock.settimeout(timeout)  # socket 读超时
         return r.read().decode("utf-8", "ignore")
 
 
@@ -58,7 +61,7 @@ def v6_prefixes(net, plen=48):
         yield net
         return
     step = 1 << (plen - net.prefixlen)
-    base = int(net.network_address)
+    base = int(net.network_address) & ~((1 << (128 - plen)) - 1)  # 对齐到 plen 边界
     for i in range(step):
         yield ipaddress.ip_network((base + i) << (128 - plen), plen)
 
@@ -75,67 +78,11 @@ def v4_prefixes(net, plen=24):
 
 # ── 采样 ──
 
-def sample_cf_ips(count: int, use_v6: bool, geo_db=None, country_filter: list | None = None):
-    """
-    从官方 IP 段采样 count 个 IP。
-
-    若提供 geo_db（geoip.Ip2RegionDB）且 country_filter 非空：
-      按 /48（v6）或 /24（v4）前缀探测实际归属国，只保留属于目标国家的 IP；
-      归属信息按 IP 真实归属解析（ip2region），命中前缀内全部主机 IP 都可用。
-    否则：全量随机采样。
-
-    返回 (ips, matched_prefixes, total_prefixes, fallback: bool)
-      fallback=True 表示地理过滤未命中、已回退全量随机。
-    """
+def sample_cf_ips(count: int, use_v6: bool) -> list:
+    """从官方 IP 段随机采样 count 个 IP（按 /24、/48 前缀分层随机，不展开全量）。"""
     raw = fetch_cf_ips()
     cidrs = raw["v6"] if use_v6 else raw["v4"]
-    want_ver = 6 if use_v6 else 4
-
-    use_geo = geo_db is not None and bool(country_filter)
-    if use_geo:
-        prefixes = []
-        seen = set()
-        for c in cidrs:
-            try:
-                net = ipaddress.ip_network(c, strict=False)
-            except ValueError:
-                continue
-            if net.version != want_ver:
-                continue
-            gen = v6_prefixes(net, 48) if want_ver == 6 else v4_prefixes(net, 24)
-            for p in gen:
-                key = int(p.network_address)
-                if key not in seen:
-                    seen.add(key)
-                    prefixes.append(p)
-        random.shuffle(prefixes)
-
-        matched_ips = []
-        matched_prefixes = 0
-        need = count * 4  # 多备一些，测速淘汰后仍够
-        for p in prefixes:
-            probe = str(p.network_address + (1 if p.network_address < p.broadcast_address else 0))
-            cc = geo_db.country_code(probe)
-            if cc in {c.upper() for c in country_filter}:
-                matched_prefixes += 1
-                for h in p.hosts():
-                    matched_ips.append(str(h))
-                    if len(matched_ips) >= need:
-                        break
-            if len(matched_ips) >= need:
-                break
-
-        if matched_ips:
-            random.shuffle(matched_ips)
-            return matched_ips[:count], matched_prefixes, len(prefixes), False
-        # 未命中：回退全量
-        all_ips = _expand_all(cidrs, want_ver)
-        random.shuffle(all_ips)
-        return all_ips[:count], 0, len(prefixes), True
-
-    all_ips = _expand_all(cidrs, want_ver)
-    random.shuffle(all_ips)
-    return all_ips[:count], 0, len(cidrs), False
+    return _expand_sample(cidrs, 6 if use_v6 else 4)[:count]
 
 
 def probe_location(ip: str, use_tls=True, timeout=4):
@@ -197,24 +144,38 @@ def probe_location(ip: str, use_tls=True, timeout=4):
                 pass
 
 
-def _expand_all(cidrs, want_ver):
-    """展开全部 CIDR 为 IP 列表（v6 按 /48 每个取一个随机主机）。"""
-    ips = []
+def _expand_sample(cidrs, want_ver):
+    """从 CIDR 列表直接采样（不展开全量）：v4 按 /24、v6 按 /48 前缀各取一个随机主机，
+    随机前缀重复取若干轮，保证随机性又避免枚举数百万 IP。"""
+    nets = []
     for c in cidrs:
         try:
             net = ipaddress.ip_network(c, strict=False)
         except ValueError:
             continue
-        if net.version != want_ver:
-            continue
-        if want_ver == 4:
-            for h in net.hosts():
-                ips.append(str(h))
-        else:
-            for p in v6_prefixes(net, 48):
-                first = int(p.network_address)
-                last = int(p.broadcast_address)
-                if last > first:
-                    idx = random.getrandbits(64) % (last - first + 1)
-                    ips.append(str(ipaddress.ip_address(first + idx)))
+        if net.version == want_ver:
+            nets.append(net)
+    if not nets:
+        return []
+
+    # 收集前缀块（每个前缀块是 [first, last] 整数区间）；直接整数运算，避免 ip_network 构造
+    bits = 32 if want_ver == 4 else 128
+    host_bits = (24 if want_ver == 4 else 48)
+    mask = (1 << (bits - host_bits)) - 1
+    blocks = []
+    for n in nets:
+        first = int(n.network_address) & ~mask
+        last = int(n.broadcast_address)
+        for base in range(first, last + 1, 1 << (bits - host_bits)):
+            blocks.append((base, min(base + (1 << (bits - host_bits)) - 1, last)))
+    if not blocks:
+        return []
+
+    ips = []
+    for _ in range(3):  # 3 轮随机前缀
+        random.shuffle(blocks)
+        for first, last in blocks:
+            ips.append(str(ipaddress.ip_address(first + random.getrandbits(bits) % (last - first + 1))))
+            if len(ips) >= 5000:
+                return ips
     return ips

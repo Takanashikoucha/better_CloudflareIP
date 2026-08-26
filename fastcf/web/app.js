@@ -25,10 +25,8 @@ const state = {
   count: 5,
   colo: "",          // 指定 DC，空 = 自动就近
   countries: new Set(DEFAULT_ON),
-  sample: 150,
   speedSecs: 8,
   speedMB: 50,
-  bw: 100,
   minSpeed: 0,       // 下载速度下限（Mbps）；>0 时凑够 count 个达标 IP 即停
 };
 
@@ -66,10 +64,8 @@ function initControls() {
     };
     state[key] = parseInt(el.value, 10) || dflt;
   };
-  numBind("#inSample", "sample", 20, 3000, 150);
   numBind("#inSecs", "speedSecs", 3, 60, 8);
   numBind("#inMB", "speedMB", 10, 1000, 50);
-  numBind("#inBW", "bw", 1, 10000, 100);
   numBind("#inMinSpeed", "minSpeed", 0, 10000, 0);
   bindSeg("#segVer", "ipVer");
   // tls 按钮 data-v 是 "1"/"0"，统一存布尔，避免 params() 里再做字符串比较
@@ -252,10 +248,8 @@ function params() {
     count: parseInt(state.count, 10) || 5,
     colo: state.colo,
     countries: Array.from(state.countries),
-    sample: state.sample || 150,
     speedSecs: state.speedSecs || 8,
     speedMB: state.speedMB || 50,
-    bw: state.bw || 100,
     minSpeed: state.minSpeed || 0,
   };
 }
@@ -281,7 +275,6 @@ function showResults(res) {
   $$(".tabbar button").forEach((b, i) => b.classList.toggle("on", i === 0));
   $$(".tab").forEach(t => t.classList.toggle("show", t.id === "tab-results"));
   let rows = (res.results || []).slice();
-  const bw = 100; // Mbps 参考
   // 排序：ping 升序 / loss 升序 / mbps 降序（i 表示保持扫描排名）
   if (resSortKey === "mbps") rows.sort((a, b) => (b.mbps || 0) - (a.mbps || 0));
   else if (resSortKey === "loss") rows.sort((a, b) => (a.loss ?? 1) - (b.loss ?? 1));
@@ -296,15 +289,15 @@ function showResults(res) {
     const rankCls = i === 0 ? "gold" : i === 1 ? "silver" : i === 2 ? "bronze" : "";
     const loc = r.location || r.geo || "";
     const dc = r.dc_zh || r.dc || "—";
-    const pctBw = Math.min(100, Math.round((r.mbps || 0) / bw * 100));
+    const bwOk = state.minSpeed > 0 ? (r.mbps || 0) >= state.minSpeed : true;
     tr.innerHTML =
       '<td class="rank ' + rankCls + '">' + (i + 1) + '</td>' +
       '<td class="ip" title="点击复制 IP">' + esc(r.ip) + (loc ? '<span class="sub">' + esc(loc) + '</span>' : '') + '</td>' +
       '<td>' + esc(dc) + (r.dc && r.dc_zh ? '<span class="sub">CF 机房 ' + esc(r.dc) + '</span>' : '') + '</td>' +
       '<td class="lat">' + (r.latency ?? r.ping ?? 0) + ' <span class="unit">ms</span></td>' +
       '<td class="loss" style="color:' + (r.loss == null ? "var(--muted)" : (r.loss <= 0.1 ? "var(--green)" : r.loss <= 0.3 ? "var(--accent)" : "var(--red, #e05252)")) + '">' + (r.loss == null ? "—" : Math.round(r.loss * 100) + '<span class="unit">%</span>') + '</td>' +
-      '<td class="mbps" style="color:' + ((r.mbps || 0) >= bw ? "var(--green)" : "var(--accent)") + '">' + (r.mbps || 0) + '<span class="unit">Mbps</span><span class="sub">' + pctBw + '% of 期望带宽</span></td>' +
-      '<td><span class="badge ' + (r.port === 443 ? "tls" : "plain") + '">' + (r.port === 443 ? "TLS:443" : "HTTP:80") + '</span></td>' +
+      '<td class="mbps" style="color:' + (bwOk ? "var(--green)" : "var(--accent)") + '">' + (r.mbps || 0) + '<span class="unit">Mbps</span>' + (state.minSpeed > 0 ? '<span class="sub">' + (bwOk ? '≥ 下限 ' + state.minSpeed : '未达下限') + '</span>' : '') + '</td>' +
+      '<td><span class="badge ' + (r.tls === false ? "plain" : "tls") + '">' + (r.tls === false ? "HTTP:80" : "TLS:443") + '</span></td>' +
       '<td><button class="rowcopy" title="复制 IP">📋</button></td>';
     tr.querySelector(".ip").onclick = () => copyText(r.ip);
     tr.querySelector(".rowcopy").onclick = () => copyText(r.ip);
@@ -361,7 +354,7 @@ async function loadHistory() {
       if (typeof p.colo === "string") { state.colo = p.colo; $("#selDC").value = p.colo || ""; }
       syncCountryChipVisibility();
       if (Array.isArray(p.countries) && p.countries.length) setChips(p.countries);
-      for (const [id, k] of [["#inSample", "sample"], ["#inSecs", "speedSecs"], ["#inMB", "speedMB"], ["#inBW", "bw"], ["#inMinSpeed", "minSpeed"]]) {
+      for (const [id, k] of [["#inSecs", "speedSecs"], ["#inMB", "speedMB"], ["#inMinSpeed", "minSpeed"]]) {
         if (p[k] != null) $(id).value = p[k];
       }
       toast("已载入历史参数");
@@ -469,8 +462,8 @@ async function loadStatus() {
   $("#stVer").textContent = "FastCF v" + (s.version || "1.0");
   $("#stDir").textContent = s.data_dir;
   $("#stDir").title = s.data_dir;
-  $("#stXdb").textContent = "xdb v4 " + mb(s.xdb_v4) + " · v6 " + mb(s.xdb_v6);
-  $("#stPool").textContent = `池 ${s.pool_dc} 节点 / ${s.pool_ips} IP`;
+  $("#stXdb").textContent = "CF 段缓存 " + (s.cf_cache ? mb(s.cf_cache) : "未缓存");
+  $("#stPool").textContent = `池 ${s.pool_dc} 节点 / ${s.pool_ips} IP` + (s.pool_expired ? "（待重探）" : "");
   $("#stColo").textContent = `colo 表 ${s.colo_count} 节点 · Py ${s.python}`;
 }
 async function openInfo() {
@@ -480,10 +473,8 @@ async function openInfo() {
     ["版本", "FastCF " + (s.version || "1.0")],
     ["Python", s.python || "?"],
     ["数据目录", `<code>${esc(s.data_dir || "")}</code>`],
-    ["ip2region v4", s.xdb_v4 ? mb(s.xdb_v4) : "未下载"],
-    ["ip2region v6", s.xdb_v6 ? mb(s.xdb_v6) : "未下载"],
-    ["CF IP 缓存", s.cf_cache ? mb(s.cf_cache) : "未缓存"],
-    ["IP 池", `${s.pool_dc || 0} 节点 · ${s.pool_ips || 0} IP（7 天 TTL）`],
+    ["CF IP 段缓存", s.cf_cache ? mb(s.cf_cache) : "未缓存"],
+    ["IP 池", `${s.pool_dc || 0} 节点 · ${s.pool_ips || 0} IP（7 天 TTL，过期自动重探）`],
     ["colo 参考表", `${s.colo_count || 0} 个节点`],
     ["运行状态", s.running ? "⏳ 扫描中" : "空闲"],
     ["参考实现", '<a href="https://github.com/XIU2/CloudflareSpeedTest" target="_blank" style="color:var(--accent)">XIU2/CloudflareSpeedTest</a>'],

@@ -1,6 +1,3 @@
 # FastCF 零第三方依赖
 # 仅需 Python 3.10+ 标准库（ssl / socket / ipaddress / http.server / json / threading / concurrent.futures）
-# 地理数据源 ip2region xdb 在首次启动时自动下载到 ~/.fastcf/，无需 pip install
-#
-# 如需验证内嵌的 ip2region Python binding（fastcf/ip2region/，Apache 2.0）：
-#   python3 -c "from fastcf.ip2region import util, searcher; print('ok')"
+# 所有数据（CF 官方 IP 段、colo 参考表）均为运行时在线获取 + 本地缓存，无需 pip install

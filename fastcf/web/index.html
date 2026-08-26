@@ -84,11 +84,6 @@
 
     <div class="row" style="margin-top:18px">
       <div class="field">
-        <label>采样数量</label>
-        <input type="number" id="inSample" value="150" min="20" max="3000" step="10">
-        <div class="hint">ping 预筛选的 IP 数，越大候选越多、耗时越长</div>
-      </div>
-      <div class="field">
         <label>测速时长（秒）</label>
         <input type="number" id="inSecs" value="8" min="3" max="60" step="1">
         <div class="hint">每个候选 IP 的测速时间</div>
@@ -97,11 +92,6 @@
         <label>测速流量（MB）</label>
         <input type="number" id="inMB" value="50" min="10" max="1000" step="10">
         <div class="hint">下载流量上限，速度取时长内峰值</div>
-      </div>
-      <div class="field">
-        <label>期望带宽（Mbps）</label>
-        <input type="number" id="inBW" value="100" min="1" max="10000">
-        <div class="hint">用于结果对比参考</div>
       </div>
       <div class="field">
         <label>速度下限（Mbps）</label>
@@ -171,7 +161,7 @@
     </div>
   </div>
 
-  <div class="footer">FastCF v__VERSION__ · 数据源：cloudflare.com/ips + ip2region + speed.cloudflare.com · 所有流量直连（绕过系统代理）</div>
+  <div class="footer">FastCF v__VERSION__ · 数据源：cloudflare.com/ips + Netrvin/cloudflare-colo-list + speed.cloudflare.com · 所有流量直连（绕过系统代理）</div>
 </div>
 
 <!-- IP 池管理面板 -->

@@ -1,9 +1,13 @@
 # -*- coding: utf-8 -*-
-"""DC 级 IP 池缓存。
+"""DC 级 IP 池。
 
-每个 DC（colo）维护约 POOL_SIZE 个已验证可直连的 IP 作为基底池；
-扫描时从池里随机取 TEST_SIZE 个测速，测速结果（新验证的 IP）回写池。
-冷启动（池为空）时扫描回退到全量采样。
+每个 DC（colo）维护约 POOL_SIZE 个已验证可直连的 IP；
+扫描时从池里随机取 IP 测速，任何探测行为只要读到实际服务节点
+（cf-meta-colo），就把 IP 写回**实际命中的那个 DC**（无目标过滤）。
+
+TTL 语义：池按"最后入池时间"过期（默认 7 天）。过期后 IP **不删除**，
+由后台 filler 重新探测：探测成功 → 写回实际 DC 池并刷新时间戳；
+探测失败 → 剔除。
 """
 import ipaddress
 import json
@@ -19,41 +23,50 @@ DATA_DIR = Path(os.environ.get("FASTCF_HOME", str(Path.home() / ".fastcf")))
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 POOL_FILE = DATA_DIR / "ip_pools.json"
 
-POOL_SIZE = 100    # 每个 DC 缓存的 IP 数量
-TEST_SIZE = 100    # 每次扫描从池里随机测的 IP 数量
-TTL = 7 * 86400    # 池有效期 7 天（过期回退全量重建）
+POOL_SIZE = 50       # 每个 DC 目标的 IP 数量
+TEST_SIZE = 50       # 每次扫描从池里随机测的 IP 数量
+TTL = 7 * 86400      # 池有效期（过期触发重新探测，不直接删除）
+FILL_WORKERS = 4     # 后台填充并发数（温和，避免触发 CF 限流）
+FILL_PAUSE = 0.3     # 后台填充探测间隔（秒）
 
 _pools: dict | None = None
-_pools_ts: float = 0
+_pool_ts: dict = {}          # {DC: 该 DC 池最后刷新时间}
+_pools_ts: float = 0         # 整体最后刷新时间
+_lock = threading.Lock()
 
 
 def _load():
-    global _pools, _pools_ts
+    global _pools, _pools_ts, _pool_ts
     try:
         d = json.loads(POOL_FILE.read_text())
-        _pools = {k: d[k]["ips"] for k in d if isinstance(d[k], dict) and "ips" in d[k]}
+        _pools = {k: v["ips"] for k, v in d.get("pools", {}).items() if v.get("ips")}
+        _pool_ts = {k: v.get("ts", 0) for k, v in d.get("pools", {}).items()}
         _pools_ts = d.get("ts", 0)
     except Exception:
-        _pools, _pools_ts = {}, 0
+        _pools, _pool_ts, _pools_ts = {}, {}, 0
 
 
 def _save():
-    global _pools
     try:
         DATA_DIR.mkdir(parents=True, exist_ok=True)
-        POOL_FILE.write_text(json.dumps({"ts": time.time(),
-                                         **{k: {"ips": v} for k, v in (_pools or {}).items()}}))
+        POOL_FILE.write_text(json.dumps(
+            {"ts": time.time(),
+             "pools": {k: {"ips": v, "ts": _pool_ts.get(k, 0)} for k, v in (_pools or {}).items()}}))
     except Exception:
         pass
 
 
-def get(code: str) -> list:
-    """取某 DC 的 IP 池（可能为空）。"""
+def _ensure_loaded():
     global _pools
     if _pools is None:
-        _load()
-    if _pools_ts and time.time() - _pools_ts > TTL:
-        return []
+        with _lock:
+            if _pools is None:
+                _load()
+
+
+def get(code: str) -> list:
+    """取某 DC 的 IP 池（可能为空）。"""
+    _ensure_loaded()
     return list((_pools or {}).get(code.upper(), []))
 
 
@@ -61,32 +74,57 @@ def size(code: str) -> int:
     return len(get(code))
 
 
-def add(code: str, ips: list, max_size: int = POOL_SIZE):
-    """把验证成功的 IP 并入池（去重、保持顺序、截断）。"""
-    global _pools
-    if _pools is None:
-        _load()
-    if _pools is None:
-        _pools = {}
-    pool = _pools.setdefault(code.upper(), [])
-    for ip in ips:
-        if ip and ip not in pool:
-            pool.append(ip)
-    if len(pool) > max_size:
-        pool[:] = pool[-max_size:]
-    _save()
+def add(code: str, ips: list, max_size: int = POOL_SIZE, save: bool = True):
+    """把验证成功的 IP 并入指定 DC 的池（去重、保持顺序、截断）。"""
+    _ensure_loaded()
+    with _lock:
+        pool = _pools.setdefault(code.upper(), [])
+        changed = False
+        for ip in ips:
+            if ip and ip not in pool:
+                pool.append(ip)
+                changed = True
+        if len(pool) > max_size:
+            pool[:] = pool[-max_size:]
+            changed = True
+        if changed:
+            _pool_ts[code.upper()] = time.time()
+            _pools_ts = time.time()
+        if changed and save:
+            _save()
+
+
+def remove(code: str, ips: list):
+    """从指定 DC 的池中剔除 IP。"""
+    _ensure_loaded()
+    with _lock:
+        pool = _pools.get(code.upper())
+        if not pool:
+            return
+        before = len(pool)
+        pool[:] = [ip for ip in pool if ip not in set(ips)]
+        if len(pool) < before:
+            _save()
+
+
+def expired() -> bool:
+    """池整体是否超过 TTL（过期触发重新探测）。"""
+    return bool(_pools_ts) and time.time() - _pools_ts > TTL
+
+
+def all_codes() -> list:
+    _ensure_loaded()
+    return list((_pools or {}).keys())
 
 
 def pool_report() -> dict:
-    """池统计：{code: n}，供 /api/pools 展示。"""
-    global _pools
-    if _pools is None:
-        _load()
+    """池统计：{code: n}。"""
+    _ensure_loaded()
     return {c: len(v) for c, v in (_pools or {}).items() if v}
 
 
 def pools_detail() -> list:
-    """池明细（供前端 IP 池面板）：[{code, cc, cc_zh, size, ips}]，按 size 降序。"""
+    """池明细（前端面板）：[{code, cc, cc_zh, size, ips}]，按 size 降序。"""
     rep = pool_report()
     out = []
     for code, n in rep.items():
@@ -104,50 +142,47 @@ def pools_detail() -> list:
 
 def clear_pool(code: str) -> int:
     """清空指定 DC 的池，返回被删 IP 数。"""
-    global _pools
-    if _pools is None:
-        _load()
-    if _pools is None:
-        _pools = {}
-    n = len(_pools.get(code.upper(), []))
-    _pools.pop(code.upper(), None)
-    if n:
-        _save()
+    _ensure_loaded()
+    with _lock:
+        n = len(_pools.get(code.upper(), []))
+        _pools.pop(code.upper(), None)
+        _pool_ts.pop(code.upper(), None)
+        if n:
+            _save()
     return n
 
 
 def clear_all() -> int:
     """清空全部池，返回总 IP 数。"""
-    global _pools
-    if _pools is None:
-        _load()
-    n = sum(len(v) for v in (_pools or {}).values())
-    _pools = {}
-    _save()
+    global _pools, _pool_ts, _pools_ts
+    _ensure_loaded()
+    with _lock:
+        n = sum(len(v) for v in (_pools or {}).values())
+        _pools = {}
+        _pool_ts = {}
+        _pools_ts = 0
+        if n:
+            _save()
     return n
+
+
+def _probe(ip, use_tls, timeout=4):
+    """探测单个 IP 的实际服务节点。返回 (ip, colo, err)。"""
+    try:
+        _cc, colo, _city = ipdata.probe_location(ip, use_tls, timeout=timeout)
+        return ip, colo, None
+    except Exception as e:
+        return ip, None, str(e)
 
 
 def probe_and_add(ips: list, code_hint: str = "", use_v6: bool = False,
                   use_tls: bool = True, workers: int = 12, log=None) -> dict:
-    """手动补充 IP 入池：先做 CF 官方 IP 段校验，再并发探测实际 colo。
+    """手动补充 IP 入池：CF 官方 IP 段校验 → 并发探测实际 colo → 按实际 DC 归池。
 
-    - 不在 CF 官方 CIDR 内的 IP 会被拒绝（不入库、计入 rejected）。
-    - 探测成功且命中目标节点（code_hint 为空时按探测到的 colo 入库）→ 入池。
-    - 探测成功但 colo 与 code_hint 不一致 → 计入 mismatch，不入库。
-    - 探测失败（超时/无响应）→ 计入 failed，不入库。
-
-    返回 {"added": n, "rejected": n, "mismatch": n, "failed": n,
-          "by_colo": {code: [ips...]}, "details": [{ip, ok, colo, reason}]}
+    code_hint 非空时，探测结果与 hint 不符的计入 mismatch、不入库。
     """
     import concurrent.futures as cfu
 
-    global _pools
-    if _pools is None:
-        _load()
-    if _pools is None:
-        _pools = {}
-
-    # 1. CF 官方 IP 段校验（ipdata.fetch_cf_ips 7 天缓存）
     cf_cache = ipdata.fetch_cf_ips()
     nets = []
     for ver in ("v4", "v6"):
@@ -162,10 +197,7 @@ def probe_and_add(ips: list, code_hint: str = "", use_v6: bool = False,
             a = ipaddress.ip_address(ip_str)
         except ValueError:
             return False
-        for n in nets:
-            if n.version == a.version and a in n:
-                return True
-        return False
+        return any(n.version == a.version and a in n for n in nets)
 
     details = []
     pending = []
@@ -178,108 +210,148 @@ def probe_and_add(ips: list, code_hint: str = "", use_v6: bool = False,
             continue
         pending.append(ip)
 
-    # 2. 并发探测实际 colo
     by_colo: dict = {}
-    failed = []
+    failed = 0
+    mismatch = 0
+    target = (code_hint or "").upper()
 
     def probe(ip):
-        try:
-            cc, colo, city = ipdata.probe_location(ip, use_tls, timeout=4)
-            return ip, cc, colo, city, None
-        except Exception as e:
-            return ip, None, None, None, str(e)
+        ip, colo, err = _probe(ip, use_tls)
+        if err:
+            return ip, None, f"探测异常：{err}"
+        if not colo:
+            return ip, None, "探测无响应/无 colo 头"
+        if target and colo.upper() != target:
+            return ip, colo, f"实际 colo={colo} 与目标 {target} 不符"
+        return ip, colo, None
 
-    lock = threading.Lock()
     with cfu.ThreadPoolExecutor(max_workers=workers) as ex:
-        futs = [ex.submit(probe, ip) for ip in pending]
+        futs = {ex.submit(probe, ip): ip for ip in pending}
         for f in cfu.as_completed(futs):
-            ip, cc, colo, city, err = f.result()
+            ip, colo, reason = f.result()
             if log:
                 log(f"探测 {ip} → {colo or '(失败)'}")
-            if err:
-                details.append({"ip": ip, "ok": False, "reason": f"探测异常：{err}"})
-                failed.append(ip)
-                continue
-            if not colo:
-                details.append({"ip": ip, "ok": False, "reason": "探测无响应/无 colo 头"})
-                failed.append(ip)
-                continue
-            # code_hint 为空：按实际 colo 归池；非空：必须匹配
-            target = (code_hint or "").upper()
-            if target and colo.upper() != target:
-                details.append({"ip": ip, "ok": False,
-                                "reason": f"实际 colo={colo} 与目标 {target} 不符"})
-                continue
-            with lock:
+            if colo:
                 by_colo.setdefault(colo.upper(), []).append(ip)
+            else:
+                if "不符" in (reason or ""):
+                    mismatch += 1
+                else:
+                    failed += 1
+                details.append({"ip": ip, "ok": False, "reason": reason or "探测失败"})
 
-    # 3. 入池
     added = 0
     for colo, ip_list in by_colo.items():
-        before = len((_pools or {}).get(colo, []))
+        before = size(colo)
         add(colo, ip_list)
-        delta = len((_pools or {}).get(colo, [])) - before
+        delta = size(colo) - before
         added += delta
         if log:
             log(f"  → 入池 {colo}：+{delta}")
 
-    # 4. 汇总
-    added_ips = [ip for v in by_colo.values() for ip in v]
     return {
         "added": added,
         "rejected": len(ips) - len(pending),
-        "mismatch": sum(1 for d in details if "不符" in d.get("reason", "")),
-        "failed": len(failed),
+        "mismatch": mismatch,
+        "failed": failed,
         "by_colo": by_colo,
         "details": details,
     }
 
 
-def preheat(codes: list, use_v6: bool = False, use_tls: bool = True, workers: int = 12, log=None) -> dict:
-    """启动预热：用采样探测为指定 DC 建池（不依赖 geoip 目标匹配）。
+def _fill_batch(candidates: list, use_v6: bool, use_tls: bool,
+                stop: "callable | None" = None, log=None) -> dict:
+    """并发探测一批候选 IP，把每个 IP 写回它实际命中的 DC（无目标过滤）。
 
-    直接探测候选 IP 的 cf-meta-colo，命中目标 DC 的入库。
-    返回 {code: 池大小}。log: 可选回调 (msg)。
+    返回 {colo: [ips...]}（本轮入池汇总）。
     """
-    global _pools
-    if _pools is None:
-        _load()
-    need = {c.upper(): max(1, POOL_SIZE - len(get(c))) for c in codes if len(get(c)) < POOL_SIZE}
-    if not need:
-        return {c: len(get(c)) for c in codes}
-    if log:
-        log(f"IP 池预热：{len(need)} 个节点缺额 {sum(need.values())}")
-
     import concurrent.futures as cfu
 
-    want = min(1500, max(200, sum(need.values()) * 4))
-    raw, _mp, _tp, _fb = ipdata.sample_cf_ips(want, use_v6, None, None)
-    pool = list(raw[:want])
-    random.shuffle(pool)
-    probe_n = min(200, len(pool))
+    random.shuffle(candidates)
+    by_colo: dict = {}
+    lock = threading.Lock()
+    done = 0
 
     def probe(ip):
-        cc, colo, city = ipdata.probe_location(ip, use_tls, timeout=4)
-        return ip, cc, colo, city
+        ip, colo, err = _probe(ip, use_tls)
+        return ip, colo
 
-    lock = threading.Lock()
-    with cfu.ThreadPoolExecutor(max_workers=workers) as ex:
-        futs = {ex.submit(probe, ip): ip for ip in pool[:probe_n]}
+    with cfu.ThreadPoolExecutor(max_workers=FILL_WORKERS) as ex:
+        futs = {ex.submit(probe, ip): ip for ip in candidates}
         for f in cfu.as_completed(futs):
-            ip, cc, colo, city = f.result()
+            if stop and stop():
+                break
+            ip, colo = f.result()
+            done += 1
+            if done % 10 == 0 and log:
+                log(f"后台填充：已探测 {done}/{len(candidates)}")
             if not colo:
                 continue
             with lock:
-                if len(get(colo)) < POOL_SIZE:
-                    add(colo, [ip])
-    return {c: len(get(c)) for c in codes}
+                if size(colo) < POOL_SIZE:
+                    add(colo, [ip], save=False)
+                by_colo.setdefault(colo.upper(), []).append(ip)
+    _save()
+    return by_colo
 
 
-def preheat_nearby(cc_codes: list, use_v6: bool = False, use_tls: bool = True, log=None) -> dict:
-    """启动预热：目标国家组下全部 DC 建池。"""
-    from . import geoip
-    cc2colos = geoip.colo_list_by_cc()
-    codes = [cd["code"] for cc in cc_codes for cd in cc2colos.get(cc.upper(), [])]
-    if not codes:
-        return {}
-    return preheat(codes, use_v6, use_tls, log=log)
+def refill(codes: list | None = None, use_v6: bool = False, use_tls: bool = True,
+           max_probes: int = 200, stop: "callable | None" = None, log=None) -> dict:
+    """采样官方 IP 段 → 并发探测 → 按实际 DC 入池。
+
+    codes 仅用于判断缺额（None = 全部有池的 DC 都算）；
+    探测命中的任何 DC 都会入池（含 codes 之外的 DC）。
+    池整体过期时，先把过期池里的 IP 重新探测一遍（成功刷新、失败剔除），
+    再对缺额采样补池。
+    """
+    _ensure_loaded()
+    out: dict = {}
+
+    # 1. 过期重探：池里的老 IP 逐个探测，成功刷新实际 DC、失败剔除
+    if expired():
+        old_ips: list = []
+        for c in all_codes():
+            old_ips.extend(get(c))
+        if old_ips and log:
+            log(f"池已过期，重新探测 {len(old_ips)} 个旧 IP…")
+        # 先清空（保留数据，重探成功会重新写回；失败的即被丢弃）
+        with _lock:
+            _pools.clear()
+            _pool_ts.clear()
+        step = 20
+        for i in range(0, min(len(old_ips), max_probes * 3), step):
+            if stop and stop():
+                break
+            batch = _fill_batch(old_ips[i:i + step], use_v6, use_tls, stop, log)
+            for k, v in batch.items():
+                out.setdefault(k, []).extend(v)
+        with _lock:
+            if _pools_ts:
+                _pools_ts = time.time()
+        _save()
+
+    # 2. 缺额采样补池
+    if codes is not None:
+        need = {c.upper() for c in codes if size(c) < POOL_SIZE}
+    else:
+        need = {c for c in all_codes() if size(c) < POOL_SIZE}
+    if not need:
+        return out
+    if stop and stop():
+        return out
+
+    want = min(1500, max(100, len(need) * 20))
+    probes_left = max_probes
+    while probes_left > 0 and (need and any(size(c) < POOL_SIZE for c in need)):
+        if stop and stop():
+            break
+        n = min(probes_left, 20)
+        candidates = ipdata.sample_cf_ips(n, use_v6)
+        batch = _fill_batch(candidates, use_v6, use_tls, stop, log)
+        probes_left -= n
+        for k, v in batch.items():
+            out.setdefault(k, []).extend(v)
+            need.discard(k.upper())
+        if need:
+            time.sleep(FILL_PAUSE)
+    return out

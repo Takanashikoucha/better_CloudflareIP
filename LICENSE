@@ -24,7 +24,5 @@ SOFTWARE.
 
 第三方代码许可：
 
-- fastcf/ip2region/（ip2region Python binding）
-  原始版权归 The Ip2Region Authors 所有，Apache License 2.0。
-  来源：https://github.com/lionsoul2014/ip2region
-  完整文本见 fastcf/ip2region/LICENSE。
+- fastcf/data_colos.py（CF colo → 中文节点名参考表）
+  基于 https://github.com/Netrvin/cloudflare-colo-list （MIT License）的 DC-Colos.json 快照。
