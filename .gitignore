@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+
+# 运行产物（测速输出）
+result.csv
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# 本地运行数据（真实数据在 ~/.fastcf/，不应入仓库）
+.fastcf/
+.ipynb_checkpoints/
