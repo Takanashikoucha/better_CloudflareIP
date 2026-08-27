@@ -48,7 +48,7 @@
           <option value="">— 请选择 —</option>
         </select>
         <div class="hint">指定 DC：测该节点的 IP 池（池为空或结果不足 5 个时自动回退全局随机补齐）；
-        全局随机：从全 CF IPv4 段随机采样（TYOYO1/CF-ASN 全量段，约 876 条，比官方 ips-v4 覆盖更广）</div>
+        全局随机：从全 CF IPv4 段随机采样（TYOYO1/CF-ASN 全量段，约 876 条，比官方 ips-v4 的 14 条大段覆盖更广）</div>
       </div>
       <div class="field">
         <label>随机 IP 数量（全局随机时生效）</label>
@@ -152,7 +152,7 @@
         指定 DC 扫描时事件性重验）。
         入池途径：手动探测并添加 / 随机 IP 测速前探测 / 测速成功回写。
         <b>入池时自动探测</b>：先确认 IP 属于 Cloudflare IPv4 段
-        （TYOYO1/CF-ASN 全量段，约 876 条，比官方 ips-v4 覆盖更广），
+        （TYOYO1/CF-ASN 全量段，约 876 条，比官方 ips-v4 的 14 条大段覆盖更广），
         再实际拨号读取 CF 返回的 <code>cf-meta-colo</code> 按实际节点归池。
       </p>
       <div class="row" style="margin-bottom:10px;align-items:flex-start">

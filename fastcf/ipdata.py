@@ -4,7 +4,7 @@
 数据源（主）：[TYOYO1/CF-ASN](https://github.com/TYOYO1/CF-ASN) 的
 cf-asn-list.txt（AS13335 + AS209242 全量 CIDR，约 876 条，含大量 /23、/24，
 覆盖官方 ips-v4 之外散布的各 DC 子网，随机采样空间更大）。
-数据源（备）：https://www.cloudflare.com/ips-v4（15 条大段，主源失败时兜底）。
+数据源（备）：https://www.cloudflare.com/ips-v4（14 条大段，主源失败时兜底）。
 缓存 7 天，过期自动刷新；主源失败自动回退官方源。
 """
 import ipaddress

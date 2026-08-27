@@ -10,8 +10,8 @@
 
 - 🎯 **固定口径** — IPv4 · 443/TLS · 结果固定 5 个，不做协议/版本/数量选择
 - 🌐 **两种来源模式** — 指定 DC（测该节点 IP 池）/ 全局随机（全 CF v4 段随机采样 N 个，N 可调 10–2000；
-   段数据源为 [TYOYO1/CF-ASN](https://github.com/TYOYO1/CF-ASN) 全量 CIDR（约 876 条 /23–/24 小段，
-   比官方 `ips-v4` 的 15 条大段覆盖更广，随机采样空间更大）
+   段数据源为 [TYOYO1/CF-ASN](https://github.com/TYOYO1/CF-ASN) 全量 CIDR（约 876 条，以 /22–/24 小段为主，
+   比官方 `ips-v4` 的 14 条大段覆盖更广，随机采样空间更大）
 - 📡 **真·ICMP ping 预筛** — 系统 `ping` 命令（4 包、单包 2s 超时），**并发 200**；取平均时延 + 丢包率
 - 🗄️ **DC 级 IP 池（纯手动 + 副产品）** — 每 DC 上限 50 个 IP，7 天 TTL；无后台线程，过期不删除，
   指定 DC 扫描时**事件性重验**（前台同步 ping 全池，失效剔除、存活刷新时间戳）
@@ -128,7 +128,7 @@ README.md              # 本文档
 | 数据 | 来源 | 更新策略 |
 |------|------|----------|
 | CF IPv4 段（主） | [TYOYO1/CF-ASN](https://github.com/TYOYO1/CF-ASN) `cf-asn-list.txt`（AS13335 + AS209242 全量，约 876 条 CIDR，含大量 /23、/24） | 7 天缓存，过期自动刷新；主源失败自动回退官方源 |
-| CF IPv4 段（备） | `https://www.cloudflare.com/ips-v4`（15 条大段） | 仅在主源获取失败时兜底 |
+| CF IPv4 段（备） | `https://www.cloudflare.com/ips-v4`（14 条大段） | 仅在主源获取失败时兜底 |
 | CF colo 参考表 | [Netrvin/cloudflare-colo-list](https://github.com/Netrvin/cloudflare-colo-list) `DC-Colos.json`（内置静态快照兜底） | 3 天 TTL，在线失败沿用快照 |
 | 测速节点 | `speed.cloudflare.com/__down?bytes=N`（443/TLS） | 实时请求（`cf-ray` / `cf-meta-*` 头返回实际服务地） |
 
