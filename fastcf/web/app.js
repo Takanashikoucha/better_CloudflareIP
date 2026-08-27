@@ -414,7 +414,7 @@ async function loadStatus() {
   $("#stVer").textContent = "FastCF v" + (s.version || "2.0");
   $("#stDir").textContent = s.data_dir;
   $("#stDir").title = s.data_dir;
-  $("#stXdb").textContent = "CF 段缓存 " + (s.cf_cache ? mb(s.cf_cache) : "未缓存");
+  $("#stXdb").textContent = `CF 段 ${s.cf_cidrs || "?"} 条` + (s.cf_cache ? " · " + mb(s.cf_cache) : "");
   $("#stPool").textContent = `池 ${s.pool_dc} 节点 / ${s.pool_ips} IP` + (s.pool_expired ? "（待重验）" : "");
   $("#stColo").textContent = `colo 表 ${s.colo_count} 节点 · Py ${s.python}`;
 }
@@ -425,7 +425,7 @@ async function openInfo() {
     ["版本", "FastCF " + (s.version || "2.0")],
     ["Python", s.python || "?"],
     ["数据目录", `<code>${esc(s.data_dir || "")}</code>`],
-    ["CF IPv4 段缓存", s.cf_cache ? mb(s.cf_cache) : "未缓存"],
+    ["CF IPv4 段缓存", `${s.cf_cidrs || "?"} 条 CIDR（TYOYO1/CF-ASN 全量段） · ${s.cf_cache ? mb(s.cf_cache) : "未缓存"}`],
     ["IP 池", `${s.pool_dc || 0} 节点 · ${s.pool_ips || 0} IP（7 天 TTL，指定 DC 扫描时事件性重验）`],
     ["colo 参考表", `${s.colo_count || 0} 个节点`],
     ["运行状态", s.running ? "⏳ 扫描中" : "空闲"],

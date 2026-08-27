@@ -9,7 +9,7 @@ from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from . import __version__, exports, geoip, pools
+from . import __version__, exports, geoip, ipdata, pools
 from .scanner import Scanner
 
 WEB_DIR = Path(__file__).parent / "web"
@@ -218,6 +218,7 @@ class FastCFHandler(BaseHTTPRequestHandler):
                 "version": __version__,
                 "data_dir": str(d),
                 "cf_cache": d.joinpath("cf_ips.json").stat().st_size if d.joinpath("cf_ips.json").exists() else 0,
+                "cf_cidrs": len(ipdata.fetch_cf_ips().get("v4", [])),
                 "pool_dc": len(rep),
                 "pool_ips": sum(rep.values()),
                 "pool_expired": pools.expired(),
@@ -261,7 +262,7 @@ class FastCFHandler(BaseHTTPRequestHandler):
                 self._json({"ok": True, "removed": n})
             elif act == "add":
                 # 手动补充 IP 入池：
-                #   1) 校验 IP 是否在 CF 官方 IP 段内（不在 → 拒绝）
+                #   1) 校验 IP 是否在 CF IPv4 段内（TYOYO1/CF-ASN 全量段；不在 → 拒绝）
                 #   2) 并发拨号读 cf-meta-colo 得到实际服务节点
                 #   3) 按实际 colo 归池（或匹配 body 指定的 code）
                 code = (body.get("code") or "").strip().upper()

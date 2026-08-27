@@ -6,7 +6,7 @@
 **实际命中的那个 DC**（无目标过滤）。
 
 入池途径（无后台线程，全部前台/事件性）：
-  1. 手动探测并添加（probe_and_add：官方段校验 + cf-meta-colo 归池）
+  1. 手动探测并添加（probe_and_add：CF IPv4 段校验（TYOYO1/CF-ASN 全量段）+ cf-meta-colo 归池）
   2. 扫描中随机 IP 测速前探测入池
   3. 测速成功的 IP 回写其实际 DC
 
@@ -197,27 +197,14 @@ def probe_and_add(ips: list, code_hint: str = "", use_tls: bool = True,
                   workers: int = 12, log=None) -> dict:
     """手动补充 IP 入池（手动探测并添加功能）：
 
-    1. CF 官方 IPv4 段校验（不在段内 → rejected）
+    1. CF IPv4 段校验（TYOYO1/CF-ASN 全量段为主、官方 ips-v4 兜底；不在段内 → rejected）
     2. 并发探测 cf-meta-colo 实际服务节点
        - code_hint 为空：按实际 colo 归池
        - code_hint 非空：结果必须匹配，否则 mismatch
     """
     import concurrent.futures as cfu
 
-    cf_cache = ipdata.fetch_cf_ips()
-    nets = []
-    for c in cf_cache.get("v4", []):
-        try:
-            nets.append(ipaddress.ip_network(c, strict=False))
-        except Exception:
-            pass
-
-    def in_cf(ip_str: str) -> bool:
-        try:
-            a = ipaddress.ip_address(ip_str)
-        except ValueError:
-            return False
-        return a.version == 4 and any(a in n for n in nets)
+    cidrs = ipdata.fetch_cf_ips().get("v4", [])
 
     details = []
     pending = []
@@ -225,8 +212,8 @@ def probe_and_add(ips: list, code_hint: str = "", use_tls: bool = True,
         ip = raw.strip()
         if not ip:
             continue
-        if not in_cf(ip):
-            details.append({"ip": ip, "ok": False, "reason": "不在 CF 官方 IPv4 段"})
+        if not ipdata.is_in_cf_v4(ip, cidrs):
+            details.append({"ip": ip, "ok": False, "reason": "不在 CF IPv4 段"})
             continue
         pending.append(ip)
 

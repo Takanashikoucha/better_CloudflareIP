@@ -166,6 +166,98 @@ def test_prefix_edge_cases():
     assert callable(ipdata.sample_cf_ips)
 
 
+def test_is_in_cf_v4():
+    # 段归属校验（显式传 cidrs，不触网）
+    cidrs = ["192.0.2.0/24", "198.51.100.0/28"]
+    assert ipdata.is_in_cf_v4("192.0.2.1", cidrs)
+    assert ipdata.is_in_cf_v4("192.0.2.254", cidrs)
+    assert ipdata.is_in_cf_v4("198.51.100.14", cidrs)
+    assert not ipdata.is_in_cf_v4("198.51.100.16", cidrs)  # /28 边界外（.0–.15 在内）
+    assert not ipdata.is_in_cf_v4("203.0.113.1", cidrs)     # 不在任何段
+    # 非法 / 非 v4 输入 → False
+    assert not ipdata.is_in_cf_v4("not-an-ip", cidrs)
+    assert not ipdata.is_in_cf_v4("2606:4700::1", cidrs)
+    assert not ipdata.is_in_cf_v4("192.0.2.1", [])          # 空段列表
+    # 段内非法 CIDR 行被跳过、不抛异常
+    assert ipdata.is_in_cf_v4("192.0.2.1", ["badcidr", "192.0.2.0/24"])
+
+
+def test_parse_cidr_lines():
+    # 纯文本 CIDR 列表解析：忽略空行 / 注释 / 非法行
+    out = ipdata._parse_cidr_lines("192.0.2.0/24\n\n# comment\nbadcidr\n 198.51.100.0/28 \n")
+    assert out == ["192.0.2.0/24", "198.51.100.0/28"], out
+    assert ipdata._parse_cidr_lines("") == []
+    assert ipdata._parse_cidr_lines("# only comment\n") == []
+
+
+def test_fetch_cf_ips_urls_and_fallback():
+    # 主源 = TYOYO1/CF-ASN cf-asn-list.txt，备源 = 官方 ips-v4
+    assert ipdata.CF_IPS_URLS[0].endswith("cf-asn-list.txt")
+    assert ipdata.CF_IPS_URLS[0].startswith("https://")
+    assert ipdata.CF_IPS_URLS[1] == "https://www.cloudflare.com/ips-v4"
+    # 模拟主源失败 → 回退备源成功
+    calls = []
+    orig = ipdata._direct_download
+    def fake(url, timeout=30):
+        calls.append(url)
+        if "cf-asn-list" in url:
+            raise RuntimeError("主源不可达")
+        return "192.0.2.0/24\n"
+    import fastcf.ipdata as _ip
+    _ip.CF_IPS_CACHE = Path("/nonexistent-fastcf-test/cf_ips.json")  # 强制绕过缓存
+    _ip._direct_download = fake
+    try:
+        out = _ip.fetch_cf_ips(force=True)
+        assert out["v4"] == ["192.0.2.0/24"]
+        assert out["source"] == "https://www.cloudflare.com/ips-v4"
+        assert calls[0].endswith("cf-asn-list.txt")          # 先试主源
+    finally:
+        _ip._direct_download = orig
+        _ip.CF_IPS_CACHE = orig_cache_path()
+    # 全部失败 → 抛异常
+    _ip._direct_download = lambda url, timeout=30: (_ for _ in ()).throw(RuntimeError("nope"))
+    _ip.CF_IPS_CACHE = Path("/nonexistent-fastcf-test/cf_ips.json")
+    try:
+        try:
+            _ip.fetch_cf_ips(force=True)
+            assert False, "should raise"
+        except RuntimeError:
+            pass
+    finally:
+        _ip._direct_download = orig
+        _ip.CF_IPS_CACHE = orig_cache_path()
+
+
+def orig_cache_path():
+    from pathlib import Path as P
+    import os
+    return P(os.environ.get("FASTCF_HOME", str(P.home() / ".fastcf"))) / "cf_ips.json"
+
+
+def test_sample_cf_ips_large_segment():
+    # 主源段多为 /23、/24（小段）；采样必须能处理小段且覆盖全部块
+    import tempfile
+    with tempfile.TemporaryDirectory() as d:
+        p = os.path.join(d, "cf_ips.json")
+        with open(p, "w") as f:
+            json.dump({
+                "ts": time.time(),
+                "v4": ["192.0.2.0/24", "198.51.100.0/23", "203.0.113.0/24"],  # 混合段
+            }, f)
+        p_old = ipdata.CF_IPS_CACHE
+        ipdata.CF_IPS_CACHE = Path(p)
+        try:
+            ips = ipdata.sample_cf_ips(30, use_v6=False)
+        finally:
+            ipdata.CF_IPS_CACHE = p_old
+        assert len(ips) > 0, "采样应能覆盖混合段"
+        # 采样出的 IP 必须全部落在给定段内
+        nets = [ipaddress.ip_network(c) for c in ["192.0.2.0/24", "198.51.100.0/23", "203.0.113.0/24"]]
+        for ip in ips:
+            a = ipaddress.ip_address(ip)
+            assert any(a in n for n in nets), f"{ip} 不在段内"
+
+
 def test_icmp_ping_unreachable():
     # TEST-NET 地址必然不可达：返回 (0, 1.0)，不抛异常
     avg, loss = scanner.icmp_ping("192.0.2.1", times=1, timeout=1)

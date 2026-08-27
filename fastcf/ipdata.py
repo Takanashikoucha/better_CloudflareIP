@@ -1,8 +1,11 @@
 # -*- coding: utf-8 -*-
-"""Cloudflare 官方 IPv4 段获取 / 缓存 / 采样。
+"""Cloudflare IPv4 段获取 / 缓存 / 采样。
 
-数据源：https://www.cloudflare.com/ips-v4（纯文本 CIDR 列表，IPv6 已移除）。
-缓存 7 天，过期自动刷新。
+数据源（主）：[TYOYO1/CF-ASN](https://github.com/TYOYO1/CF-ASN) 的
+cf-asn-list.txt（AS13335 + AS209242 全量 CIDR，约 876 条，含大量 /23、/24，
+覆盖官方 ips-v4 之外散布的各 DC 子网，随机采样空间更大）。
+数据源（备）：https://www.cloudflare.com/ips-v4（15 条大段，主源失败时兜底）。
+缓存 7 天，过期自动刷新；主源失败自动回退官方源。
 """
 import ipaddress
 import json
@@ -15,7 +18,10 @@ DATA_DIR = Path(os.environ.get("FASTCF_HOME", str(Path.home() / ".fastcf")))
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 CF_IPS_CACHE = DATA_DIR / "cf_ips.json"
 
-CF_IPS_URL = "https://www.cloudflare.com/ips-v4"
+CF_IPS_URLS = [
+    "https://raw.githubusercontent.com/TYOYO1/CF-ASN/main/cf-asn-list.txt",  # 主源：全量 ASN 段
+    "https://www.cloudflare.com/ips-v4",                                    # 备源：官方段
+]
 CACHE_TTL = 7 * 86400  # 7 天
 
 
@@ -30,8 +36,26 @@ def _direct_download(url, timeout=30):
         return r.read().decode("utf-8", "ignore")
 
 
+def _parse_cidr_lines(text: str) -> list:
+    """解析纯文本 CIDR 列表（逐行，忽略空行与注释）。"""
+    out = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        try:
+            ipaddress.ip_network(line, strict=False)  # 校验，非法行丢弃
+        except ValueError:
+            continue
+        out.append(line)
+    return out
+
+
 def fetch_cf_ips(force=False) -> dict:
-    """获取并缓存 Cloudflare 官方 IPv4 段。返回 {'v4': [cidr...], 'ts': ...}"""
+    """获取并缓存 Cloudflare IPv4 段。返回 {'v4': [cidr...], 'ts': ..., 'source': url}
+
+    按 CF_IPS_URLS 顺序尝试（主源 TYOYO1/CF-ASN，备源官方 ips-v4），全部失败抛异常。
+    """
     if not force and CF_IPS_CACHE.exists():
         try:
             cached = json.loads(CF_IPS_CACHE.read_text())
@@ -39,10 +63,43 @@ def fetch_cf_ips(force=False) -> dict:
                 return cached
         except Exception:
             pass
-    text = _direct_download(CF_IPS_URL)
-    out = {"ts": time.time(), "v4": [line.strip() for line in text.splitlines() if line.strip()]}
-    CF_IPS_CACHE.write_text(json.dumps(out))
-    return out
+    last_err = None
+    for url in CF_IPS_URLS:
+        try:
+            v4 = _parse_cidr_lines(_direct_download(url))
+            if not v4:
+                last_err = f"{url} 返回空列表"
+                continue
+            out = {"ts": time.time(), "v4": v4, "source": url}
+            try:
+                CF_IPS_CACHE.write_text(json.dumps(out))
+            except Exception:
+                pass  # 落盘失败不影响本次返回
+            return out
+        except Exception as e:
+            last_err = f"{url}: {e}"
+    raise RuntimeError(f"所有 CF IPv4 段数据源均获取失败：{last_err}")
+
+
+# ── 段归属校验 ──
+
+def is_in_cf_v4(ip: str, cidrs: list = None) -> bool:
+    """判断 IPv4 是否落在 CF 段内（cidrs 缺省用缓存/现取的官方段）。"""
+    if cidrs is None:
+        cidrs = fetch_cf_ips().get("v4", [])
+    try:
+        a = ipaddress.ip_address(ip.strip())
+    except ValueError:
+        return False
+    if a.version != 4:
+        return False
+    for c in cidrs:
+        try:
+            if a in ipaddress.ip_network(c, strict=False):
+                return True
+        except ValueError:
+            continue
+    return False
 
 
 # ── IPv4 前缀工具 ──
@@ -64,7 +121,7 @@ def v4_prefixes(net, plen=24):
 # ── 采样 ──
 
 def sample_cf_ips(count: int, use_v6: bool = False) -> list:
-    """从官方 IPv4 段随机采样 count 个 IP（按 /24 前缀分层随机，不展开全量）。
+    """从 CF IPv4 段（TYOYO1/CF-ASN 全量段，主源失败回退官方 ips-v4）随机采样 count 个 IP（按 /24 前缀分层随机，不展开全量）。
 
     use_v6 参数保留仅为向后兼容旧调用，v6 已不支持，忽略。
     """
