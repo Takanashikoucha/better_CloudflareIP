@@ -60,19 +60,11 @@ COUNTRY_ZH = {
     "SR": "苏里南", "TT": "特立尼达和多巴哥", "ZM": "赞比亚", "ZW": "津巴布韦",
 }
 
-# 默认就近国家（用户默认在中国大陆）
-DEFAULT_NEARBY = ["CN", "HK", "MO", "TW", "JP", "KR", "SG", "MY"]
-
-
 def country_zh(code: str) -> str:
     """ISO 代码 → 中文国家名。"""
     if not code:
         return "未知"
     return COUNTRY_ZH.get(code.strip().upper(), code)
-
-
-def countries_zh(codes: list) -> str:
-    return "、".join(country_zh(c) for c in codes)
 
 
 # ── CF 三字码头 → 中文数据中心名 ──

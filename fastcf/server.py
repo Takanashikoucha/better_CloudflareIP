@@ -9,7 +9,7 @@ from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from . import __version__, exports, filler, geoip, pools
+from . import __version__, exports, geoip, pools
 from .scanner import Scanner
 
 WEB_DIR = Path(__file__).parent / "web"
@@ -55,12 +55,6 @@ class ScanManager:
         with self.lock:
             if self.scanner and self.scanner.last_state and self.scanner.last_state.get("running"):
                 return False, "扫描正在进行中"
-            # 闸门：首次全量子网遍历完成前禁止测速
-            f = filler.start()
-            sw = f.status()
-            if not sw.get("done"):
-                return False, (f"首次全量子网遍历进行中（{sw.get('detail') or '启动中'}），"
-                               "完成前无法开始测速")
             self.scanner = Scanner(params)
             self.last_result = None
         t = threading.Thread(target=self._run, args=(self.scanner, params), daemon=True)
@@ -154,9 +148,6 @@ class FastCFHandler(BaseHTTPRequestHandler):
                 out["result"] = result
                 out["params"] = manager.last_params
             out["running"] = manager.running
-            # 首次全量子网遍历状态（前端闸门 + 进度条）
-            f = filler.start()
-            out["sweep"] = f.status()
             self._json(out)
         elif path == "/api/history":
             self._json(load_history())
@@ -234,8 +225,6 @@ class FastCFHandler(BaseHTTPRequestHandler):
                 "running": manager.running,
                 "python": ".".join(str(x) for x in sys.version_info[:3]),
             }
-            f = filler.start()
-            st["sweep"] = f.status()
             self._json(st)
         else:
             self._json({"error": "not found"}, 404)
@@ -280,8 +269,7 @@ class FastCFHandler(BaseHTTPRequestHandler):
                 if not ips:
                     self._json({"error": "缺少 ips"}, 400)
                     return
-                use_v6 = any(":" in x for x in ips)
-                res = pools.probe_and_add(ips, code, use_v6=use_v6, use_tls=True, workers=12)
+                res = pools.probe_and_add(ips, code, use_tls=True, workers=12)
                 self._json({"ok": True, **res})
             else:
                 self._json({"error": "bad action"}, 400)

@@ -13,7 +13,7 @@
       <div class="logo">CF</div>
       <div>
         <h1>FastCF</h1>
-        <small>Cloudflare IP 优选 · Linux · 零依赖 · 直连测速</small>
+        <small>Cloudflare IP 优选 · IPv4 · 443/TLS · 直连测速</small>
       </div>
     </div>
     <div class="actions">
@@ -38,60 +38,22 @@
     <span id="stColo" class="st-item"></span>
   </div>
 
-  <!-- 全量遍历进度横幅（首次遍历完成前显示，完成前禁止测速） -->
-  <div class="card sweep-banner" id="sweepBanner" style="display:none">
-    <div class="sweep-head">
-      <span class="sweep-ico">🌍</span>
-      <div>
-        <b id="sweepTitle">全量子网遍历中</b>
-        <span class="hint" id="sweepDetail" style="margin:2px 0 0"></span>
-      </div>
-      <span class="sweep-elapsed" id="sweepElapsed"></span>
-    </div>
-    <div class="stagebar sweep-bar"><div class="fill" id="sweepFill"></div></div>
-  </div>
-
   <!-- 扫描设置 -->
   <div class="card" id="settingsCard">
     <h3><span class="dot"></span>扫描设置</h3>
-    <div class="row">
-      <div class="field">
-        <label>IP 版本</label>
-        <div class="seg" id="segVer">
-          <button data-v="v4" class="on">IPv4</button>
-          <button data-v="v6">IPv6</button>
-        </div>
-      </div>
-      <div class="field">
-        <label>测速协议</label>
-        <div class="seg" id="segTls">
-          <button data-v="1" class="on">TLS (443)</button>
-          <button data-v="0">HTTP (80)</button>
-        </div>
-      </div>
-      <div class="field">
-        <label>结果数量</label>
-        <div class="seg" id="segCount">
-          <button data-v="1">1</button>
-          <button data-v="3">3</button>
-          <button data-v="5" class="on">5</button>
-        </div>
-      </div>
-    </div>
-
-    <div class="row" style="margin-top:16px;gap:28px">
+    <div class="row" style="gap:28px">
       <div class="field" style="max-width:320px">
-        <label>指定 DC 节点（可选）</label>
+        <label>IP 来源</label>
         <select id="selDC">
-          <option value="">— 自动就近（按国家组）—</option>
-          <option value="RANDOM">🌐 全局随机（全 CF 池）</option>
+          <option value="">— 请选择 —</option>
         </select>
-        <div class="hint">按国家选择（代表该国全部节点）；中国大陆可精确到城市；不选则按下方国家组自动就近</div>
+        <div class="hint">指定 DC：测该节点的 IP 池（池为空或结果不足 5 个时自动回退全局随机补齐）；
+        全局随机：从全 CF 官方 IPv4 段随机采样</div>
       </div>
       <div class="field">
-        <label>就近国家组（不指定 DC 时生效）</label>
-        <div class="chiprow" id="countryChips"></div>
-        <div class="hint">多选；默认勾选中国大陆及港澳台、日韩新马</div>
+        <label>随机 IP 数量（全局随机时生效）</label>
+        <input type="number" id="inRandCount" value="150" min="10" max="2000" step="10">
+        <div class="hint">从全 CF IPv4 段随机采样多少个 IP 参与 ping + 测速</div>
       </div>
     </div>
 
@@ -99,7 +61,7 @@
       <div class="field">
         <label>测速时长（秒）</label>
         <input type="number" id="inSecs" value="8" min="3" max="60" step="1">
-        <div class="hint">每个候选 IP 的测速时间</div>
+        <div class="hint">每个候选 IP 的下载测速时间</div>
       </div>
       <div class="field">
         <label>测速流量（MB）</label>
@@ -109,12 +71,7 @@
       <div class="field">
         <label>速度下限（Mbps）</label>
         <input type="number" id="inMinSpeed" value="0" min="0" max="10000" step="10">
-        <div class="hint">下载测速凑够「结果数量」个达标 IP 即提前停止；0 = 测满候选</div>
-      </div>
-      <div class="field">
-        <label>测速候选数</label>
-        <input type="number" id="inTopRtt" value="10" min="3" max="30" step="1">
-        <div class="hint">ping 预筛选后进入下载测速的候选 IP 数（其余仅作 0Mbps 备用）</div>
+        <div class="hint">凑够 5 个达标 IP 即提前停止；0 = 任何速度 &gt;0 都算达标</div>
       </div>
     </div>
   </div>
@@ -144,7 +101,7 @@
     <div class="tab show" id="tab-results">
       <div class="card table-card">
         <div class="res-head">
-          <h3><span class="dot"></span>结果（点击表头排序）</h3>
+          <h3><span class="dot"></span>结果（Top 5，点击表头排序）</h3>
           <div class="res-ops">
             <select id="resSort">
               <option value="ping">按延迟排序</option>
@@ -159,7 +116,7 @@
             <th data-k="i">#</th><th data-k="ip">IP 地址</th><th data-k="dc">数据中心</th>
             <th data-k="ping" class="sortable on">ping 延迟</th>
             <th data-k="loss" class="sortable">丢包率</th>
-            <th data-k="mbps" class="sortable">峰值速度</th><th data-k="proto" class="sortable">协议</th><th></th>
+            <th data-k="mbps" class="sortable">峰值速度</th><th></th>
           </tr></thead>
           <tbody id="resBody"></tbody>
         </table>
@@ -179,7 +136,7 @@
     </div>
   </div>
 
-  <div class="footer">FastCF v__VERSION__ · 数据源：cloudflare.com/ips + Netrvin/cloudflare-colo-list + speed.cloudflare.com · 所有流量直连（绕过系统代理）</div>
+  <div class="footer">FastCF v__VERSION__ · 数据源：cloudflare.com/ips-v4 + Netrvin/cloudflare-colo-list + speed.cloudflare.com · 所有流量直连（绕过系统代理）</div>
 </div>
 
 <!-- IP 池管理面板 -->
@@ -191,15 +148,16 @@
     </div>
     <div class="modal-body">
       <p class="hint" style="margin:0 0 12px">
-        每个 DC（节点）缓存已验证可直连的 IP（上限 50/节点，7 天有效期）。
-        扫描成功的 IP 会自动回写；也可手动补充或删除。
-        <b>入池时自动探测</b>：先确认 IP 属于 Cloudflare 官方 IP 段，
-        再实际拨号读取 CF 返回的 <code>cf-meta-colo</code>，与目标节点不符的 IP 会被拒绝入池。
+        每个 DC（节点）缓存已验证可直连的 IPv4 IP（上限 50/节点，7 天有效期，过期后
+        指定 DC 扫描时事件性重验）。
+        入池途径：手动探测并添加 / 随机 IP 测速前探测 / 测速成功回写。
+        <b>入池时自动探测</b>：先确认 IP 属于 Cloudflare 官方 IPv4 段，
+        再实际拨号读取 CF 返回的 <code>cf-meta-colo</code> 按实际节点归池。
       </p>
       <div class="row" style="margin-bottom:10px;align-items:flex-start">
         <div class="field" style="flex:1 1 auto">
-          <label>IP 列表（每行一个，支持批量）</label>
-          <textarea id="poolIps" rows="3" placeholder="2606:4700::6810:1"></textarea>
+          <label>IPv4 列表（每行一个，支持批量）</label>
+          <textarea id="poolIps" rows="3" placeholder="104.16.13.35&#10;172.67.0.1"></textarea>
           <div class="hint">留空时不指定节点：入池 IP 按其探测到的实际 colo 归入对应节点池</div>
         </div>
         <div class="field" style="flex:0 0 auto;align-self:flex-end">

@@ -160,34 +160,6 @@ input[type="number"]:focus, select:focus { border-color: var(--accent); }
 }
 .seg button.on { background: linear-gradient(135deg, var(--accent), var(--accent2)); color: #fff; font-weight: 700; }
 
-/* 开关 */
-.switch { display: flex; align-items: center; gap: 10px; cursor: pointer; user-select: none; }
-.switch input { display: none; }
-.switch .track {
-  width: 40px; height: 22px; border-radius: 11px;
-  background: var(--card-bd); position: relative; transition: background .2s;
-  flex-shrink: 0;
-}
-.switch .track::after {
-  content: ""; position: absolute; width: 16px; height: 16px; border-radius: 50%;
-  background: #fff; top: 3px; left: 3px; transition: left .2s;
-}
-.switch input:checked + .track { background: linear-gradient(135deg, var(--accent), var(--accent2)); }
-.switch input:checked + .track::after { left: 21px; }
-.switch .lbl { font-size: 13px; }
-
-/* 国家 chips */
-.chiprow { display: flex; flex-wrap: wrap; gap: 8px; }
-.chip {
-  border: 1px solid var(--card-bd); background: var(--code-bg);
-  color: var(--dim); padding: 6px 13px; border-radius: 99px;
-  font-size: 13px; cursor: pointer; transition: all .15s; user-select: none;
-}
-.chip.on {
-  background: linear-gradient(135deg, var(--accent), var(--accent2));
-  color: #fff; border-color: transparent; font-weight: 600;
-}
-
 /* ── 状态信息栏 ── */
 .statusbar {
   display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
@@ -228,23 +200,6 @@ input[type="number"]:focus, select:focus { border-color: var(--accent); }
 .logbox .line.warn { color: var(--yellow); }
 .logbox .line.error { color: var(--red); }
 .logbox .ts { opacity: .55; margin-right: 6px; }
-
-/* ── 全量遍历横幅 ── */
-.sweep-banner {
-  border: 1px solid rgba(251,191,36,.4);
-  background: linear-gradient(135deg, rgba(251,191,36,.08), rgba(56,189,248,.06));
-}
-[data-theme="dark"] .sweep-banner {
-  border-color: rgba(251,191,36,.35);
-}
-.sweep-head {
-  display: flex; align-items: center; gap: 12px; margin-bottom: 12px;
-}
-.sweep-ico { font-size: 26px; }
-.sweep-head b { font-size: 15px; display: block; }
-.sweep-head .hint { margin: 0; }
-.sweep-elapsed { margin-left: auto; font-family: Menlo, monospace; font-size: 12px; color: var(--dim); white-space: nowrap; }
-.sweep-bar { margin-bottom: 0; }
 
 /* ── 选项卡 ── */
 .tabbar { display: flex; gap: 8px; margin-bottom: 16px; }

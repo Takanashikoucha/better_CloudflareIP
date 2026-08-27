@@ -2,6 +2,9 @@
 # -*- coding: utf-8 -*-
 """FastCF — Cloudflare IP 优选测速工具（Linux · 零第三方依赖 · 直连）
 
+固定口径：IPv4 · 443/TLS · 结果 5 个。
+模式：指定 DC / 全局随机；无后台扫描线程，IP 池靠手动添加 + 扫描副产品。
+
 用法：
     python3 fastcf.py                 # 启动并自动打开浏览器
     python3 fastcf.py --port 8080     # 指定端口
@@ -22,7 +25,7 @@ os.environ["NO_PROXY"] = "*"
 def main():
     import argparse
     import webbrowser
-    from fastcf import __version__, server, geoip, filler
+    from fastcf import __version__, server, geoip
 
     ap = argparse.ArgumentParser(description="FastCF — Cloudflare IP 优选测速（Linux）")
     ap.add_argument("--host", default="127.0.0.1", help="监听地址（默认 127.0.0.1）")
@@ -38,12 +41,7 @@ def main():
     srv, port = server.start(args.host, args.port)
     url = f"http://{args.host}:{port}"
 
-    # 后台预热：刷新 colo 参考数据 → 启动常驻 IP 池填充线程
-    def _fill_log(msg):
-        import time
-        print(f"[{time.strftime('%H:%M:%S')}][filler] {msg}", flush=True)
-
-    filler.start(log=_fill_log)
+    # 后台预热：刷新 colo 参考数据（3 天 TTL，失败沿用内置快照）
     geoip.preload()
 
     print("=" * 56)
@@ -59,7 +57,6 @@ def main():
         srv.serve_forever()
     except KeyboardInterrupt:
         print("\n已退出")
-        filler.stop()
         srv.shutdown()
 
 

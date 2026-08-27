@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
-"""Cloudflare 官方 IP 段获取 / 缓存 / 采样。
+"""Cloudflare 官方 IPv4 段获取 / 缓存 / 采样。
 
-数据源：https://www.cloudflare.com/ips-v4 和 ips-v6（纯文本 CIDR 列表）。
+数据源：https://www.cloudflare.com/ips-v4（纯文本 CIDR 列表，IPv6 已移除）。
 缓存 7 天，过期自动刷新。
 """
 import ipaddress
@@ -15,10 +15,7 @@ DATA_DIR = Path(os.environ.get("FASTCF_HOME", str(Path.home() / ".fastcf")))
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 CF_IPS_CACHE = DATA_DIR / "cf_ips.json"
 
-CF_IPS_URL = {
-    "v4": "https://www.cloudflare.com/ips-v4",
-    "v6": "https://www.cloudflare.com/ips-v6",
-}
+CF_IPS_URL = "https://www.cloudflare.com/ips-v4"
 CACHE_TTL = 7 * 86400  # 7 天
 
 
@@ -34,41 +31,21 @@ def _direct_download(url, timeout=30):
 
 
 def fetch_cf_ips(force=False) -> dict:
-    """获取并缓存 Cloudflare 官方 IP 段。返回 {'v4': [cidr...], 'v6': [cidr...], 'ts': ...}"""
+    """获取并缓存 Cloudflare 官方 IPv4 段。返回 {'v4': [cidr...], 'ts': ...}"""
     if not force and CF_IPS_CACHE.exists():
         try:
             cached = json.loads(CF_IPS_CACHE.read_text())
-            if time.time() - cached.get("ts", 0) < CACHE_TTL and cached.get("v4") and cached.get("v6"):
+            if time.time() - cached.get("ts", 0) < CACHE_TTL and cached.get("v4"):
                 return cached
         except Exception:
             pass
-    out = {"ts": time.time(), "v4": [], "v6": []}
-    for ver in ("v4", "v6"):
-        text = _direct_download(CF_IPS_URL[ver])
-        for line in text.splitlines():
-            line = line.strip()
-            if line:
-                out[ver].append(line)
+    text = _direct_download(CF_IPS_URL)
+    out = {"ts": time.time(), "v4": [line.strip() for line in text.splitlines() if line.strip()]}
     CF_IPS_CACHE.write_text(json.dumps(out))
     return out
 
 
-# ── IPv6 前缀工具 ──
-
-def v6_prefixes(net, plen=48):
-    """把 IPv6 网段切成 /plen 前缀（如 /32 → 65536 个 /48）。
-
-    用 ipaddress 的 .subnets(new_prefix=) API（C 层字符串操作，
-    不依赖 Python 整数算术——该算术在部分构建下不稳定，见 README「开发」）。
-    """
-    if net.version != 6:
-        raise ValueError(f"v6_prefixes 只接受 IPv6 网段：{net}")
-    if plen <= net.prefixlen:
-        yield net
-        return
-    for prefix in net.subnets(new_prefix=plen):
-        yield prefix
-
+# ── IPv4 前缀工具 ──
 
 def v4_prefixes(net, plen=24):
     """把 IPv4 网段切成 /plen 前缀（如 /8 → 65536 个 /24）。
@@ -86,40 +63,13 @@ def v4_prefixes(net, plen=24):
 
 # ── 采样 ──
 
-def sample_cf_ips(count: int, use_v6: bool) -> list:
-    """从官方 IP 段随机采样 count 个 IP（按 /24、/48 前缀分层随机，不展开全量）。"""
-    raw = fetch_cf_ips()
-    cidrs = raw["v6"] if use_v6 else raw["v4"]
-    return _expand_sample(cidrs, 6 if use_v6 else 4)[:count]
+def sample_cf_ips(count: int, use_v6: bool = False) -> list:
+    """从官方 IPv4 段随机采样 count 个 IP（按 /24 前缀分层随机，不展开全量）。
 
-
-def sample_cf_subnets(count: int, use_v6: bool) -> list:
-    """随机采样 count 个 /24（v4）或 /48（v6）子网。
-
-    返回 [str(ip_network), ...]，每个代表一个 CF 官方 CIDR 下的子网。
-    用于建池：同一子网内 IP 通常归属同一 DC，探测一个即可批量入池。
+    use_v6 参数保留仅为向后兼容旧调用，v6 已不支持，忽略。
     """
     raw = fetch_cf_ips()
-    cidrs = raw["v6"] if use_v6 else raw["v4"]
-    target_plen = 48 if use_v6 else 24
-
-    blocks = []
-    for c in cidrs:
-        try:
-            net = ipaddress.ip_network(c, strict=False)
-        except ValueError:
-            continue
-        if net.version != (6 if use_v6 else 4):
-            continue
-        if net.prefixlen > target_plen:
-            # 已经是更小的子网，直接当 1 个块
-            blocks.append(net)
-        elif net.prefixlen < target_plen:
-            blocks.extend(net.subnets(new_prefix=target_plen))
-        else:
-            blocks.append(net)
-    random.shuffle(blocks)
-    return [str(b) for b in blocks[:count]]
+    return _expand_sample(raw["v4"], 4)[:count]
 
 
 def probe_location(ip: str, use_tls=True, timeout=4):

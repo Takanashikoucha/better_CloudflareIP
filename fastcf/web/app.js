@@ -1,36 +1,21 @@
-/* FastCF 前端逻辑 */
+/* FastCF 前端逻辑（v2：IPv4 · 443/TLS · Top5 · 指定 DC / 全局随机） */
 "use strict";
 
 const $ = (s) => document.querySelector(s);
 const $$ = (s) => Array.from(document.querySelectorAll(s));
-
-const COUNTRIES = [
-  ["CN", "中国大陆"], ["HK", "中国香港"], ["MO", "中国澳门"], ["TW", "中国台湾"],
-  ["JP", "日本"], ["KR", "韩国"], ["SG", "新加坡"], ["MY", "马来西亚"],
-  ["US", "美国"], ["GB", "英国"], ["DE", "德国"], ["NL", "荷兰"],
-  ["FR", "法国"], ["AU", "澳大利亚"], ["CA", "加拿大"],
-  ["RU", "俄罗斯"], ["IN", "印度"], ["TH", "泰国"], ["VN", "越南"],
-  ["ID", "印度尼西亚"], ["PH", "菲律宾"], ["BR", "巴西"], ["ZA", "南非"],
-];
-const DEFAULT_ON = ["CN", "HK", "MO", "TW", "JP", "KR", "SG", "MY"];
 
 let lastResult = null;
 let lastResultSource = "latest";  // "latest" | {id} — 当前展示结果对应的导出来源
 let sse = null;
 let logN = 0;
 let resSortKey = "ping";
-let sweepTimer = null;   // 全量遍历状态轮询
-let sweepDone = null;    // 首次遍历是否完成
 const state = {
-  ipVer: "v4",
-  tls: true,
-  count: 5,
-  colo: "",          // 指定 DC，空 = 自动就近
-  countries: new Set(DEFAULT_ON),
+  mode: "",        // "" | "DC" | "RANDOM"
+  colo: "",        // 指定 DC 三字码（mode=DC 时有效）
+  randomCount: 150,// 全局随机采样的 IP 数量
   speedSecs: 8,
   speedMB: 50,
-  minSpeed: 0,       // 下载速度下限（Mbps）；>0 时凑够 count 个达标 IP 即停
-  top_rtt: 10,       // ping 预筛选后进入下载测速的候选数
+  minSpeed: 0,     // 下载速度下限（Mbps）；0 = 任何速度 >0 都达标
 };
 
 /* ── 主题 ── */
@@ -48,14 +33,6 @@ function setTheme(t, silent) {
 
 /* ── 控件绑定 ── */
 function initControls() {
-  // 分段按钮
-  const bindSeg = (el, key, parse) => {
-    $$(el + " button").forEach(b => b.onclick = () => {
-      $$(el + " button").forEach(x => x.classList.remove("on"));
-      b.classList.add("on");
-      state[key] = parse ? parse(b.dataset.v) : b.dataset.v;
-    });
-  };
   // 数值字段 → state（params() 直接读 state，历史复用即可生效）
   const numBind = (id, key, min, max, dflt) => {
     const el = $(id);
@@ -70,36 +47,15 @@ function initControls() {
   numBind("#inSecs", "speedSecs", 3, 60, 8);
   numBind("#inMB", "speedMB", 10, 1000, 50);
   numBind("#inMinSpeed", "minSpeed", 0, 10000, 0);
-  numBind("#inTopRtt", "top_rtt", 3, 30, 10);
-  bindSeg("#segVer", "ipVer");
-  // tls 按钮 data-v 是 "1"/"0"，统一存布尔，避免 params() 里再做字符串比较
-  bindSeg("#segTls", "tls", v => v === "1");
-  bindSeg("#segCount", "count", v => parseInt(v, 10));
+  numBind("#inRandCount", "randomCount", 10, 2000, 150);
 
-  // DC 节点下拉框（选中后隐藏国家组 chip，恢复自动就近时显示）
+  // 来源下拉：指定 DC / 全局随机
   $("#selDC").onchange = (e) => {
-    state.colo = e.target.value;
-    syncCountryChipVisibility();
+    const v = e.target.value;
+    if (v === "RANDOM") { state.mode = "RANDOM"; state.colo = ""; }
+    else if (v) { state.mode = "DC"; state.colo = v; }
+    else { state.mode = ""; state.colo = ""; }
   };
-
-  syncCountryChipVisibility();
-
-  // 国家 chips（去重）
-  const seen = new Set();
-  const chipsEl = $("#countryChips");
-  for (const [code, name] of COUNTRIES) {
-    if (seen.has(code)) continue;
-    seen.add(code);
-    const c = document.createElement("span");
-    c.className = "chip" + (state.countries.has(code) ? " on" : "");
-    c.textContent = name;
-    c.onclick = () => {
-      if (state.countries.has(code)) state.countries.delete(code);
-      else state.countries.add(code);
-      c.classList.toggle("on");
-    };
-    chipsEl.appendChild(c);
-  }
 
   // 结果表（CSV 下载走后端 /api/export，复制 IP 走剪贴板）
   $("#btnDlCsv").onclick = () => {
@@ -151,47 +107,31 @@ function initControls() {
   };
 }
 
-/* 国家组 chip 可见性：指定 DC 或全局随机时隐藏（它们不依赖国家组） */
-function syncCountryChipVisibility() {
-  const wrap = $("#countryChips");
-  if (wrap) wrap.style.display = state.colo ? "none" : "";
-  const lab = wrap && wrap.closest(".field");
-  if (lab) lab.style.display = state.colo ? "none" : "";
-}
-
-/* ── DC 节点选择：国家级为主，中国展开城市 ── */
+/* ── DC 节点选择：指定 DC（国家分组）/ 全局随机 ── */
 async function loadColos() {
   const sel = $("#selDC");
   if (!sel) return;
   const cur = sel.value;
-  // 始终保留：自动就近 + 全局随机（loadColos 被 30s 定时调用，不重建会丢失）
-  sel.innerHTML =
-    '<option value="">— 自动就近（按国家组）—</option>' +
-    '<option value="RANDOM">🌐 全局随机（全 CF 池）</option>';
+  sel.innerHTML = '<option value="">— 请选择 —</option>';
+  const oRandom = document.createElement("option");
+  oRandom.value = "RANDOM";
+  oRandom.textContent = "🌐 全局随机（全 CF 官方 IPv4 段）";
+  sel.appendChild(oRandom);
   try {
     const groups = await fetch("/api/colos").then(r => r.json());
     for (const g of groups) {
       const og = document.createElement("optgroup");
       og.label = `${g.cc_zh} (${g.cc})`;
-      if (g.cc === "CN") {
-        // 中国大陆：展开列出城市级节点，可精确到单点
-        for (const c of g.items) {
-          const o = document.createElement("option");
-          o.value = c.code;
-          o.textContent = c.name.replace(/^中国·?/, "") + (c.pool ? `  · 池 ${c.pool} IP` : "");
-          og.appendChild(o);
-        }
-      } else {
-        // 其他国家：只选国家（代表该国全部节点）
+      for (const c of g.items) {
         const o = document.createElement("option");
-        o.value = "CC:" + g.cc;
-        o.textContent = `${g.cc_zh}（${g.count} 个节点）` + (g.pool ? `  · 池 ${g.pool} IP` : "");
+        o.value = c.code;
+        o.textContent = c.name.replace(/^中国·?/, "") + (c.pool ? `  · 池 ${c.pool} IP` : "");
         og.appendChild(o);
       }
       sel.appendChild(og);
     }
   } catch { /* 加载失败不影响使用 */ }
-  // 恢复选择（含 RANDOM / 国家 / 具体 DC）
+  // 恢复选择（含 RANDOM / 具体 DC）
   if (cur && Array.from(sel.options).some(o => o.value === cur)) sel.value = cur;
 }
 
@@ -215,7 +155,7 @@ function onState(d) {
   $("#stageFill").style.width = d.pct + "%";
   $("#stageDetail").textContent = d.detail || "";
   $("#stageElapsed").textContent = "耗时 " + (d.elapsed || 0) + "s";
-  // 池统计实时刷新（SSE 每 ~1.5s 下发一次，状态栏立即反映后台填充入池）
+  // 池统计实时刷新
   if (d.pool_ips != null) {
     $("#stPool").textContent = `池 ${d.pool_dc} 节点 / ${d.pool_ips} IP`;
   }
@@ -246,30 +186,25 @@ function onState(d) {
   }
 }
 function stageName(s) {
-  return { prepare: "准备中", geo: "加载地理库", sample: "采样 IP", rtt: "RTT 验证", speed: "带宽测速", done: "扫描完成", error: "出错" }[s] || s;
+  return { prepare: "准备中", geo: "采样 IP", revalidate: "池重验", rtt: "ping 预筛", speed: "下载测速", done: "扫描完成", error: "出错" }[s] || s;
 }
-function esc(s) { return s.replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c])); }
+function esc(s) { return String(s).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c])); }
 
 /* ── 扫描 ── */
 function params() {
+  if (!state.mode) return null;
   return {
-    ipVer: state.ipVer,
-    tls: state.tls === true,
-    count: parseInt(state.count, 10) || 5,
-    colo: state.colo,
-    countries: Array.from(state.countries),
+    mode: state.mode,
+    colo: state.colo || "",
+    randomCount: state.randomCount || 150,
     speedSecs: state.speedSecs || 8,
     speedMB: state.speedMB || 50,
     minSpeed: state.minSpeed || 0,
-    top_rtt: state.top_rtt || 10,
   };
 }
 async function startScan() {
-  // 闸门：首次遍历未完成时直接提示
-  if (sweepDone === false) {
-    return toast("首次全量子网遍历进行中，完成前无法测速");
-  }
   const p = params();
+  if (!p) return toast("请先选择 IP 来源（指定 DC 或全局随机）");
   const ok = await fetch("/api/scan", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(p) });
   const r = await ok.json();
   if (r.error) return toast(r.error);
@@ -278,13 +213,8 @@ async function startScan() {
 }
 function setRunningUI(on) {
   const btn = $("#btnScan");
-  if (on) {
-    btn.disabled = true;
-    btn.textContent = "⏳ 扫描中...";
-  } else {
-    // 扫描结束后恢复按钮状态（受遍历闸门约束）
-    syncScanGate();
-  }
+  btn.disabled = on;
+  btn.textContent = on ? "⏳ 扫描中..." : "🚀 开始优选";
   $("#btnCancel").style.display = on ? "" : "none";
   if (on) $("#progressCard").scrollIntoView({ behavior: "smooth", block: "center" });
 }
@@ -301,7 +231,6 @@ function showResults(res) {
   else if (resSortKey === "loss") rows.sort((a, b) => (a.loss ?? 1) - (b.loss ?? 1));
   else if (resSortKey === "ping") rows.sort((a, b) => (a.latency ?? a.ping ?? 1e9) - (b.latency ?? b.ping ?? 1e9));
   else if (resSortKey === "dc") rows.sort((a, b) => String(a.dc || "").localeCompare(String(b.dc || "")));
-  else if (resSortKey === "proto") rows.sort((a, b) => (a.port || 0) - (b.port || 0));
   const body = $("#resBody");
   body.innerHTML = "";
   $("#resEmpty").style.display = rows.length ? "none" : "";
@@ -310,15 +239,14 @@ function showResults(res) {
     const rankCls = i === 0 ? "gold" : i === 1 ? "silver" : i === 2 ? "bronze" : "";
     const loc = r.location || r.geo || "";
     const dc = r.dc_zh || r.dc || "—";
-    const bwOk = state.minSpeed > 0 ? (r.mbps || 0) >= state.minSpeed : true;
+    const bwOk = state.minSpeed > 0 ? (r.mbps || 0) >= state.minSpeed : (r.mbps || 0) > 0;
     tr.innerHTML =
       '<td class="rank ' + rankCls + '">' + (i + 1) + '</td>' +
       '<td class="ip" title="点击复制 IP">' + esc(r.ip) + (loc ? '<span class="sub">' + esc(loc) + '</span>' : '') + '</td>' +
       '<td>' + esc(dc) + (r.dc && r.dc_zh ? '<span class="sub">CF 机房 ' + esc(r.dc) + '</span>' : '') + '</td>' +
       '<td class="lat">' + (r.latency ?? r.ping ?? 0) + ' <span class="unit">ms</span></td>' +
       '<td class="loss" style="color:' + (r.loss == null ? "var(--dim)" : (r.loss <= 0.1 ? "var(--green)" : r.loss <= 0.3 ? "var(--yellow)" : "var(--red)")) + '">' + (r.loss == null ? "—" : Math.round(r.loss * 100) + '<span class="unit">%</span>') + '</td>' +
-      '<td class="mbps" style="color:' + (bwOk ? "var(--green)" : "var(--accent)") + '">' + (r.mbps || 0) + '<span class="unit">Mbps</span>' + (state.minSpeed > 0 ? '<span class="sub">' + (bwOk ? '≥ 下限 ' + state.minSpeed : '未达下限') + '</span>' : '') + '</td>' +
-      '<td><span class="badge ' + (r.tls === false ? "plain" : "tls") + '">' + (r.tls === false ? "HTTP:80" : "TLS:443") + '</span></td>' +
+      '<td class="mbps" style="color:' + (bwOk ? "var(--green)" : "var(--accent)") + '">' + (r.mbps || 0) + '<span class="unit">Mbps</span>' + (state.minSpeed > 0 ? '<span class="sub">' + (bwOk ? '≥ 下限 ' + state.minSpeed : '未达下限') : '') + '</td>' +
       '<td><button class="rowcopy" title="复制 IP">📋</button></td>';
     tr.querySelector(".ip").onclick = () => copyText(r.ip);
     tr.querySelector(".rowcopy").onclick = () => copyText(r.ip);
@@ -349,11 +277,14 @@ async function loadHistory() {
   el.innerHTML = "";
   for (const e of h) {
     const best = (e.results || [])[0];
+    const p = e.params || {};
+    const modeName = e.mode === "DC" ? "指定 DC " + (e.colo || "") :
+                     e.mode === "DC+随机" ? "指定 DC " + (e.colo || "") + "+随机" : "全局随机";
     const div = document.createElement("div");
     div.className = "hist-item";
     div.innerHTML =
       '<div class="meta"><b>' + e.time + '</b>' +
-      (e.ipVer === "v6" ? "IPv6" : "IPv4") + ' · ' + (e.tls ? "TLS" : "HTTP") + ' · ' + e.count + ' 个结果 · 用时 ' + (e.elapsed || 0) + 's' +
+      modeName + ' · Top' + e.count + ' · 用时 ' + (e.elapsed || 0) + 's' +
       (best ? ' · 最佳：' + best.ip + ' ' + best.mbps + 'Mbps（' + (best.dc_zh || best.dc || '—') + '）' : '') + '</div>' +
       '<div class="ops">' +
       '<button class="btn small act-reuse">重新使用参数</button>' +
@@ -365,35 +296,26 @@ async function loadHistory() {
     };
     div.querySelector(".act-view").onclick = () => { lastResultSource = e.id; showResults(e); };
     div.querySelector(".act-reuse").onclick = () => {
-      const p = e.params || {};
-      state.ipVer = p.ipVer || state.ipVer;
-      state.tls = p.tls === undefined ? state.tls : !!p.tls;
-      state.count = p.count || state.count;
-      setSeg("#segVer", state.ipVer);
-      setSeg("#segTls", state.tls);
-      if (p.count) setSeg("#segCount", String(p.count));
-      if (typeof p.colo === "string") { state.colo = p.colo; $("#selDC").value = p.colo || ""; }
-      syncCountryChipVisibility();
-      if (Array.isArray(p.countries) && p.countries.length) setChips(p.countries);
-      for (const [id, k] of [["#inSecs", "speedSecs"], ["#inMB", "speedMB"], ["#inMinSpeed", "minSpeed"], ["#inTopRtt", "top_rtt"]]) {
-        if (p[k] != null) $(id).value = p[k];
-      }
-      toast("已载入历史参数");
+      // 兼容旧历史（v1 参数）：countries/colo 非 RANDOM → 指定 DC；RANDOM → 全局随机
+      if (p.colo === "RANDOM") { state.mode = "RANDOM"; state.colo = ""; }
+      else if (p.colo) { state.mode = "DC"; state.colo = p.colo; }
+      else if (p.mode === "RANDOM") { state.mode = "RANDOM"; state.colo = ""; }
+      else if (p.mode === "DC" && p.colo) { state.mode = "DC"; state.colo = p.colo; }
+      else { state.mode = ""; state.colo = ""; }
+      $("#selDC").value = state.mode === "RANDOM" ? "RANDOM" : (state.colo || "");
+      state.randomCount = p.randomCount || state.randomCount;
+      $("#inRandCount").value = state.randomCount;
+      state.speedSecs = p.speedSecs || state.speedSecs;
+      state.speedMB = p.speedMB || state.speedMB;
+      state.minSpeed = p.minSpeed || 0;
+      $("#inSecs").value = state.speedSecs;
+      $("#inMB").value = state.speedMB;
+      $("#inMinSpeed").value = state.minSpeed;
+      toast(state.mode ? "已载入历史参数" : "已载入历史参数（来源需重新选择）");
       $("#settingsCard").scrollIntoView({ behavior: "smooth" });
     };
     el.appendChild(div);
   }
-}
-function setSeg(sel, val) {
-  $$(sel + " button").forEach(b => b.classList.toggle("on", String(b.dataset.v) === String(val)));
-}
-function setChips(codes) {
-  state.countries = new Set(codes);
-  // chip 按 COUNTRIES 顺序生成（渲染时已去重），按同序匹配
-  const uniq = COUNTRIES.filter((x, i) => COUNTRIES.findIndex(y => y[0] === x[0]) === i);
-  $$("#countryChips .chip").forEach((c, i) => {
-    c.classList.toggle("on", state.countries.has(uniq[i][0]));
-  });
 }
 
 /* ── Toast ── */
@@ -411,9 +333,8 @@ let poolsTimer = null;  // 面板打开期间的自动刷新
 function openPools() {
   $("#poolsModal").style.display = "";
   loadPools();
-  // 后台填充每 10s 左右一轮，面板打开期间每 5s 自动刷新，让入池"看得见"
   clearInterval(poolsTimer);
-  poolsTimer = setInterval(loadPools, 5000);
+  poolsTimer = setInterval(loadPools, 10000);
 }
 function closePools() {
   $("#poolsModal").style.display = "none";
@@ -427,13 +348,13 @@ async function loadPools() {
   el.innerHTML = "";
   const total = list.reduce((s, p) => s + p.size, 0);
   $("#poolStats").textContent = list.length ? `${list.length} 个节点 · ${total} 个 IP` : "（空）";
-  if (!list.length) { el.innerHTML = '<div class="empty">暂无 IP 池，完成扫描后自动生成</div>'; return; }
+  if (!list.length) { el.innerHTML = '<div class="empty">暂无 IP 池，手动添加或完成扫描后自动生成</div>'; return; }
   for (const p of list) {
     const row = document.createElement("div");
     row.className = "pool-row";
     const ipsPreview = (p.ips || []).slice(0, 3).join(", ") + (p.ips && p.ips.length > 3 ? " …" : "");
     row.innerHTML =
-      '<span class="code">' + esc(p.code) + '</span>' +
+      '<span class="code">' + esc(p.code) + (p.expired ? ' <span class="sub" style="display:inline">⏳</span>' : '') + '</span>' +
       '<span class="cc">' + esc((p.cc_zh || "") + (p.cc ? " (" + p.cc + ")" : "")) + '</span>' +
       '<span class="ips" title="' + esc((p.ips || []).join("\n")) + '">' + esc(ipsPreview) + '</span>' +
       '<span class="sz">' + p.size + ' IP</span>' +
@@ -451,7 +372,7 @@ async function loadPools() {
 }
 async function poolAdd() {
   const ips = $("#poolIps").value.trim();
-  if (!ips) return toast("请填写 IP 列表");
+  if (!ips) return toast("请填写 IPv4 列表");
   const btn = $("#btnPoolAdd");
   btn.disabled = true;
   const out = $("#poolProbeResult");
@@ -472,7 +393,7 @@ async function poolAdd() {
     }
     const summary = [
       `入池 ${d.added} 个`,
-      `非 CF IP 拒绝 ${d.rejected}`,
+      `非 CF IPv4 拒绝 ${d.rejected}`,
       `节点不符拒绝 ${d.mismatch}`,
       `探测失败 ${d.failed}`,
     ].join(" · ");
@@ -485,77 +406,27 @@ async function poolAdd() {
   }
 }
 
-/* ── 全量遍历进度横幅（首次遍历完成前禁止测速） ── */
-function parseSweepDetail(detail) {
-  // 解析 "全量遍历：1234/5956（命中 567 · 无响应 667）" → {done:1234, total:5956, ok:567}
-  if (!detail) return null;
-  const m = String(detail).match(/(\d+)\/(\d+)/);
-  if (!m) return null;
-  const mo = String(detail).match(/命中 (\d+)/);
-  return { done: parseInt(m[1], 10), total: parseInt(m[2], 10), ok: mo ? parseInt(mo[1], 10) : 0 };
-}
-function updateSweepBanner(sw) {
-  const banner = $("#sweepBanner");
-  if (!sw) return;
-  if (sw.done) {
-    banner.style.display = "none";
-    if (sweepDone !== true) {
-      sweepDone = true;
-      toast("✔ 全量子网遍历完成，测速已解锁");
-      syncScanGate();
-    }
-    return;
-  }
-  // 遍历进行中
-  if (sweepDone !== false) {
-    sweepDone = false;
-    syncScanGate();
-  }
-  banner.style.display = "";
-  const p = parseSweepDetail(sw.detail);
-  const pct = p && p.total ? Math.min(100, Math.round(p.done * 100 / p.total)) : 0;
-  $("#sweepFill").style.width = pct + "%";
-  $("#sweepDetail").textContent = sw.detail ? `进度 ${sw.detail}` : "正在枚举官方子网…";
-  // 已耗时
-  const start = sw.started ? new Date(sw.started * 1000) : null;
-  $("#sweepElapsed").textContent = start ? "已运行 " + Math.round((Date.now() - start) / 1000) + "s" : "";
-}
-function syncScanGate() {
-  // 首次遍历完成前禁用「开始优选」
-  const btn = $("#btnScan");
-  if (sweepDone === false) {
-    btn.disabled = true;
-    btn.textContent = "🌍 遍历中，完成前不可测速";
-    btn.title = "首次全量子网遍历进行中，完成前无法测速";
-  } else if (sweepDone === true) {
-    btn.disabled = false;
-    btn.textContent = "🚀 开始优选";
-    btn.title = "";
-  }
-}
-
 /* ── 状态栏 / 系统信息 ── */
 async function loadStatus() {
   const s = await fetch("/api/data-status").then(r => r.json()).catch(() => null);
   if (!s) return;
   const mb = b => b > 1048576 ? (b / 1048576).toFixed(1) + "MB" : Math.round(b / 1024) + "KB";
-  $("#stVer").textContent = "FastCF v" + (s.version || "1.0");
+  $("#stVer").textContent = "FastCF v" + (s.version || "2.0");
   $("#stDir").textContent = s.data_dir;
   $("#stDir").title = s.data_dir;
   $("#stXdb").textContent = "CF 段缓存 " + (s.cf_cache ? mb(s.cf_cache) : "未缓存");
-  $("#stPool").textContent = `池 ${s.pool_dc} 节点 / ${s.pool_ips} IP` + (s.pool_expired ? "（待重探）" : "");
+  $("#stPool").textContent = `池 ${s.pool_dc} 节点 / ${s.pool_ips} IP` + (s.pool_expired ? "（待重验）" : "");
   $("#stColo").textContent = `colo 表 ${s.colo_count} 节点 · Py ${s.python}`;
-  if (s.sweep) updateSweepBanner(s.sweep);
 }
 async function openInfo() {
   const s = await fetch("/api/data-status").then(r => r.json()).catch(() => ({}));
   const mb = b => b > 1048576 ? (b / 1048576).toFixed(1) + " MB" : Math.round(b / 1024) + " KB";
   const rows = [
-    ["版本", "FastCF " + (s.version || "1.0")],
+    ["版本", "FastCF " + (s.version || "2.0")],
     ["Python", s.python || "?"],
     ["数据目录", `<code>${esc(s.data_dir || "")}</code>`],
-    ["CF IP 段缓存", s.cf_cache ? mb(s.cf_cache) : "未缓存"],
-    ["IP 池", `${s.pool_dc || 0} 节点 · ${s.pool_ips || 0} IP（7 天 TTL，过期自动重探）`],
+    ["CF IPv4 段缓存", s.cf_cache ? mb(s.cf_cache) : "未缓存"],
+    ["IP 池", `${s.pool_dc || 0} 节点 · ${s.pool_ips || 0} IP（7 天 TTL，指定 DC 扫描时事件性重验）`],
     ["colo 参考表", `${s.colo_count || 0} 个节点`],
     ["运行状态", s.running ? "⏳ 扫描中" : "空闲"],
     ["参考实现", '<a href="https://github.com/XIU2/CloudflareSpeedTest" target="_blank" style="color:var(--accent)">XIU2/CloudflareSpeedTest</a>'],
@@ -571,21 +442,10 @@ initControls();
 (async () => {
   const s = await fetch("/api/status").then(r => r.json()).catch(() => ({}));
   if (s.result) { lastResultSource = "latest"; showResults(s.result); }
-  if (s.sweep) updateSweepBanner(s.sweep);
   loadHistory();
   loadColos();
   loadStatus();
   // 定期刷新 DC 池数量与状态栏
   setInterval(loadColos, 30000);
   setInterval(loadStatus, 30000);
-  // 全量遍历完成前：每 2s 轮询状态（进度条实时）；完成后停止轮询
-  sweepTimer = setInterval(async () => {
-    const st = await fetch("/api/data-status").then(r => r.json()).catch(() => null);
-    if (!st) return;
-    if (st.sweep) updateSweepBanner(st.sweep);
-    if (st.sweep && st.sweep.done) {
-      clearInterval(sweepTimer);
-      sweepTimer = null;
-    }
-  }, 2000);
 })();
