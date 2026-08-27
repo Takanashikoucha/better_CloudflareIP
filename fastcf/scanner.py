@@ -12,8 +12,8 @@
      时延 > 2× 最佳时延 淘汰（零丢包者豁免）
   C. 下载测速：按延迟升序串行，443/TLS 下载
      - 随机 IP 测速前先探测 cf-meta-colo 确认实际 DC 并入池
-     - 速度达标（≥下限；下限=0 时 >0 即达标）凑够 5 个 → 停止
-     - 0Mbps（CF 限流）→ 换备用 IP 重试
+     - 队列 = ping 预筛通过的全部候选，凑够 5 个达标 → 停止
+     - 未达标（0Mbps/限流等）→ 继续测队列中下一个候选
   D. 回退：指定 DC 模式候选不足（池空 / 达标数 < 5）→ 进入随机模式
      再跑一遍 B+C，把总数补齐到 5
   E. 汇总：按 延迟 → 丢包 → 速度 排序，输出 5 个
@@ -311,6 +311,9 @@ class Scanner:
                      random_pool: bool = False) -> list:
         """对候选 IP 跑 ping 预筛 + 串行下载测速，返回达标结果（最多 need 个）。
 
+        下载队列 = ping 预筛通过的全部候选（延迟升序）：按序逐个测速，
+        直到凑够 need 个达标结果才停止；队列耗尽仍未凑够（限流/异常）
+        则返回已达标部分（后续由上层回退随机模式补齐）。
         random_pool=True：随机 IP，下载测速前先探测 cf-meta-colo 入池。
         """
         if self._cancelled():
@@ -369,30 +372,31 @@ class Scanner:
             ping_results = filtered
 
         ping_results.sort(key=lambda r: (r["ping"], r["loss"]))
-        top = ping_results[:max(need, 1)]
+        queue = list(ping_results)  # 下载队列 = 全部预筛通过候选，按延迟升序
         self.log(f"ping 预筛完成：{len(ping_results)}/{pn} 个可达"
                  f"（最低丢包 {min(r['loss'] for r in ping_results):.0%}），"
-                 f"取延迟最低 {len(top)} 个进入下载测速")
-        for r in top[:15]:
+                 f"全部 {len(queue)} 个进入下载测速（凑够 {need} 个达标即停）")
+        for r in queue[:15]:
             self.log(f"  候选 {r['ip']}  ping {r['ping']}ms · 丢包 {r['loss']:.0%}")
+        if len(queue) > 15:
+            self.log(f"  …（其余 {len(queue) - 15} 个候选略）")
 
-        # ── C. 下载测速（443/TLS，按 ping 升序串行）──
+        # ── C. 下载测速（443/TLS，按延迟升序串行，队列 = 全部预筛通过候选）──
         self.set_progress("speed", 45, "下载测速")
         sl_note = (f"，速度下限 {min_speed:g}Mbps" if min_speed > 0 else "") + f"，凑够 {need} 个即停"
-        self.log(f"开始下载测速（队列 {len(top)} 个{sl_note}）")
-        reserve = [pr for pr in ping_results if pr not in top]
+        self.log(f"开始下载测速（队列 {len(queue)} 个{sl_note}）")
         results = []
-        for i, r in enumerate(top):
+        for i, r in enumerate(queue):
             if self._cancelled():
                 return results
             if len(results) >= need:
                 break
             ip = r["ip"]
-            self.set_progress("speed", 45 + int(45 * i / max(1, len(top))),
-                              f"测速 {i + 1}/{len(top)}：{ip}")
+            self.set_progress("speed", 45 + int(45 * i / max(1, len(queue))),
+                              f"测速 {i + 1}/{len(queue)}：{ip}")
             # 随机 IP：测速前探测实际服务节点，确认 DC 并入池
             if random_pool:
-                self.set_progress("speed", 45 + int(45 * i / max(1, len(top))),
+                self.set_progress("speed", 45 + int(45 * i / max(1, len(queue))),
                                   f"探测 {ip} 实际节点…")
                 _cc, colo_hit, _city = ipdata.probe_location(ip, use_tls=True, timeout=4)
                 if colo_hit:
@@ -401,17 +405,6 @@ class Scanner:
                 else:
                     self.log(f"  {ip} 探测未读到实际节点，继续测速", "warn")
             res = self._speed_test(ip, speed_mb * 1024 * 1024, speed_secs)
-            if self._cancelled():
-                return results
-            # 0Mbps → CF 限流，换备用 IP 试一次
-            if res["mbps"] == 0 and reserve and not self._cancelled():
-                alt = reserve.pop(0)
-                self.log(f"  {ip} 无数据（CF 限流），换 {alt['ip']} 试一次…", "warn")
-                res_alt = self._speed_test(alt["ip"], speed_mb * 1024 * 1024, speed_secs)
-                if res_alt["mbps"] > 0:
-                    r["ip"], r["ping"], r["loss"] = alt["ip"], \
-                        alt["ping"], alt["loss"]
-                    res = res_alt
             if self._cancelled():
                 return results
             loc = res.get("dc_zh") or res.get("location") or ""
@@ -425,8 +418,6 @@ class Scanner:
                      f"{res['mbps']} Mbps{mark} · {loc}")
             if ok:
                 results.append(res)
-            if i < len(top) - 1 and not self._cancelled():
-                time.sleep(2.0)
         return results
 
     # ── 单次下载测速（443/TLS）──

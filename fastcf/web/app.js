@@ -96,9 +96,10 @@ function initControls() {
     $("#tab-" + b.dataset.tab).classList.add("show");
   });
 
-  // 扫描 / 取消
+  // 扫描 / 取消（取消需确认；扫描结束后由 onState 把界面重置回可扫描状态）
   $("#btnScan").onclick = startScan;
   $("#btnCancel").onclick = async () => {
+    if (!confirm("确定取消当前扫描？已测出的部分结果保留在日志中。")) return;
     await fetch("/api/cancel", { method: "POST" });
   };
   $("#btnClearHist").onclick = async () => {
