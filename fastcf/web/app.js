@@ -80,6 +80,7 @@ function initControls() {
   $("#btnInfo").onclick = openInfo;
   $("#btnCloseInfo").onclick = () => $("#infoModal").style.display = "none";
   $("#btnPoolAdd").onclick = poolAdd;
+  $("#btnPoolInit").onclick = poolInit;
   $("#btnPoolClearAll").onclick = () => {
     if (!confirm("确定清空全部 IP 池？")) return;
     fetch("/api/pools", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "clear_all" }) })
@@ -368,6 +369,37 @@ async function loadPools() {
       loadPools(); loadColos();
     };
     el.appendChild(row);
+  }
+}
+async function poolInit() {
+  const btn = $("#btnPoolInit");
+  const out = $("#poolProbeResult");
+  const refresh = $("#chkRefreshCache").checked;
+  if (!confirm(`对每个 CF IPv4 段的首个 IP 并发探测实际服务节点并入池（约 877 个 IP，并发 20，预计数分钟）。\n${refresh ? "将先强制刷新 CF 段缓存（绕过 7 天 TTL）。\n" : ""}继续？`)) return;
+  btn.disabled = true;
+  out.textContent = "⏳ 正在段首 IP 探测（cf-meta-colo）…" + (refresh ? "（先刷新段缓存）" : "");
+  try {
+    const d = await fetch("/api/pools", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "init", refresh_cache: refresh }) }).then(r => r.json());
+    if (d.error) { out.textContent = "✘ " + d.error; return; }
+    const lines = [];
+    const by = Object.entries(d.by_colo || {});
+    if (by.length) {
+      lines.push("✔ 入池成功：");
+      by.sort((a, b) => b[1].length - a[1].length).slice(0, 15).forEach(([colo, lst]) =>
+        lines.push(`  → ${colo}：+${lst.length} 个（${lst.slice(0, 3).join(", ")}${lst.length > 3 ? " …" : ""}）`));
+      if (by.length > 15) lines.push(`  … 其余 ${by.length - 15} 个节点见池列表`);
+    }
+    if ((d.failed || 0) + (d.mismatch || 0) > 0) {
+      lines.push("");
+      lines.push(`探测失败 ${d.failed || 0} 个（不可达/无响应）· 节点不符拒绝 ${d.mismatch || 0} 个`);
+    }
+    const summary = `探测 ${d.total || "?"} 个段首 IP · 入池 ${d.added} · 失败 ${d.failed || 0}`;
+    out.innerHTML = esc(summary + (lines.length ? "\n" + lines.join("\n") : ""));
+    toast(`段首 IP 探测：入池 ${d.added} / ${d.total || "?"}`);
+    loadPools(); loadColos();
+  } finally {
+    btn.disabled = false;
   }
 }
 async function poolAdd() {

@@ -48,7 +48,7 @@
           <option value="">— 请选择 —</option>
         </select>
         <div class="hint">指定 DC：测该节点的 IP 池（池为空或结果不足 5 个时自动回退全局随机补齐）；
-        全局随机：从全 CF IPv4 段随机采样（TYOYO1/CF-ASN 全量段，约 876 条，比官方 ips-v4 的 14 条大段覆盖更广）</div>
+        全局随机：从全 CF IPv4 段随机采样（TYOYO1/CF-ASN 全量段，约 877 条，比官方 ips-v4 的 14 条大段覆盖更广）</div>
       </div>
       <div class="field">
         <label>随机 IP 数量（全局随机时生效）</label>
@@ -150,9 +150,9 @@
       <p class="hint" style="margin:0 0 12px">
         每个 DC（节点）缓存已验证可直连的 IPv4 IP（上限 50/节点，7 天有效期，过期后
         指定 DC 扫描时事件性重验）。
-        入池途径：手动探测并添加 / 随机 IP 测速前探测 / 测速成功回写。
+        入池途径：段首 IP 探测初始化 / 手动探测并添加 / 随机 IP 测速前探测 / 测速成功回写。
         <b>入池时自动探测</b>：先确认 IP 属于 Cloudflare IPv4 段
-        （TYOYO1/CF-ASN 全量段，约 876 条，比官方 ips-v4 的 14 条大段覆盖更广），
+        （TYOYO1/CF-ASN 全量段，约 877 条，比官方 ips-v4 的 14 条大段覆盖更广），
         再实际拨号读取 CF 返回的 <code>cf-meta-colo</code> 按实际节点归池。
       </p>
       <div class="row" style="margin-bottom:10px;align-items:flex-start">
@@ -167,6 +167,10 @@
       </div>
       <div id="poolProbeResult" class="hint" style="margin:6px 0 12px;white-space:pre-wrap"></div>
       <div class="row" style="margin-bottom:12px">
+        <button class="btn small" id="btnPoolInit">🚀 段首 IP 探测初始化</button>
+        <label class="hint" style="display:flex;align-items:center;gap:4px;margin:0 0 0 10px;cursor:pointer">
+          <input type="checkbox" id="chkRefreshCache" style="margin:0"> 先刷新 CF 段缓存（段数过旧/非全量段时勾选）
+        </label>
         <button class="btn small danger" id="btnPoolClearAll">清空全部池</button>
         <span class="hint" id="poolStats"></span>
       </div>

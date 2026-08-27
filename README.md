@@ -10,7 +10,7 @@
 
 - 🎯 **固定口径** — IPv4 · 443/TLS · 结果固定 5 个，不做协议/版本/数量选择
 - 🌐 **两种来源模式** — 指定 DC（测该节点 IP 池）/ 全局随机（全 CF v4 段随机采样 N 个，N 可调 10–2000；
-   段数据源为 [TYOYO1/CF-ASN](https://github.com/TYOYO1/CF-ASN) 全量 CIDR（约 876 条，以 /22–/24 小段为主，
+   段数据源为 [TYOYO1/CF-ASN](https://github.com/TYOYO1/CF-ASN) 全量 CIDR（约 877 条，以 /22–/24 小段为主，
    比官方 `ips-v4` 的 14 条大段覆盖更广，随机采样空间更大）
 - 📡 **真·ICMP ping 预筛** — 系统 `ping` 命令（4 包、单包 2s 超时），**并发 200**；取平均时延 + 丢包率
 - 🗄️ **DC 级 IP 池（纯手动 + 副产品）** — 每 DC 上限 50 个 IP，7 天 TTL；无后台线程，过期不删除，
@@ -86,10 +86,11 @@ python3 fastcf.py --data-dir /x   # 指定数据缓存目录
 
 ## IP 池
 
-无后台线程。池的 IP 来自三个途径：
+无后台线程。池的 IP 来自四个途径：
 
 | 途径 | 说明 |
 |------|------|
+| 段首 IP 探测初始化 | 前端"IP 池管理"面板：对**每个 CF IPv4 段的首个 IP**（全量段约 877 个）并发拨号读 `cf-meta-colo`，按实际 DC 归池；可先强制刷新段缓存（绕 7 天 TTL） |
 | 手动探测并添加 | 前端"IP 池管理"面板：CF IPv4 段校验（TYOYO1/CF-ASN 全量段）→ 并发拨号读 `cf-meta-colo` → 按实际 DC 归池 |
 | 随机 IP 测速前探测 | 随机模式进入下载测速的 IP，先探测实际服务节点并入池 |
 | 测速成功回写 | 任一模
@@ -108,7 +109,7 @@ fastcf/
   data_colos.py        # CF colo → 中文节点名参考表（Netrvin 快照，离线兜底）
   exports.py           # 结果导出（csv / json）
   geoip.py             # colo 参考数据（静态快照 + 在线刷新）/ 中文国家映射
-  ipdata.py            # CF IPv4 段获取（TYOYO1/CF-ASN 主源 + 官方 ips-v4 备源）/ 缓存 / 随机采样 / 位置探测
+  ipdata.py            # CF IPv4 段获取（TYOYO1/CF-ASN 主源 + 官方 ips-v4 备源）/ 缓存 / 随机采样 / 位置探测 / 段首 IP 探测初始化
   pools.py             # DC 级 IP 池（管理 / 手动入池校验 / 事件性过期判定）
   scanner.py           # 测速引擎（ICMP ping 并发预筛 + 443/TLS 下载测速 + 回退编排）
   server.py            # HTTP 服务（静态 UI + JSON API + SSE 流）
@@ -127,7 +128,7 @@ README.md              # 本文档
 
 | 数据 | 来源 | 更新策略 |
 |------|------|----------|
-| CF IPv4 段（主） | [TYOYO1/CF-ASN](https://github.com/TYOYO1/CF-ASN) `cf-asn-list.txt`（AS13335 + AS209242 全量，约 876 条 CIDR，含大量 /23、/24） | 7 天缓存，过期自动刷新；主源失败自动回退官方源 |
+| CF IPv4 段（主） | [TYOYO1/CF-ASN](https://github.com/TYOYO1/CF-ASN) `cf-asn-list.txt`（AS13335 + AS209242 全量，约 877 条 CIDR，含大量 /23、/24） | 7 天缓存，过期自动刷新；主源失败自动回退官方源 |
 | CF IPv4 段（备） | `https://www.cloudflare.com/ips-v4`（14 条大段） | 仅在主源获取失败时兜底 |
 | CF colo 参考表 | [Netrvin/cloudflare-colo-list](https://github.com/Netrvin/cloudflare-colo-list) `DC-Colos.json`（内置静态快照兜底） | 3 天 TTL，在线失败沿用快照 |
 | 测速节点 | `speed.cloudflare.com/__down?bytes=N`（443/TLS） | 实时请求（`cf-ray` / `cf-meta-*` 头返回实际服务地） |
@@ -147,7 +148,7 @@ README.md              # 本文档
 | POST | `/api/scan` | 开始扫描（body 见下） |
 | POST | `/api/cancel` | 取消当前扫描 |
 | POST | `/api/history` | 历史操作（`{action: "delete"|"clear", id}`） |
-| POST | `/api/pools` | 池操作（`{action: "add"|"clear"|"clear_all"}`；`add` 时 `code` 可省略，IP 按实际探测的 colo 归池，并先校验 CF IPv4 段（TYOYO1/CF-ASN 全量段）） |
+| POST | `/api/pools` | 池操作（`{action: "add"|"init"|"clear"|"clear_all"}`；`add` 时 `code` 可省略，IP 按实际探测的 colo 归池，并先校验 CF IPv4 段（TYOYO1/CF-ASN 全量段）；`init` 为段首 IP 探测初始化，`refresh_cache: true` 时先强制刷新段缓存） |
 
 ### 扫描参数（POST /api/scan body）
 
@@ -179,7 +180,11 @@ README.md              # 本文档
 ## 配置
 
 - 数据缓存目录：`~/.fastcf/`（可通过 `FASTCF_HOME` 环境变量或 `--data-dir` 覆盖）
-- CF IPv4 段缓存：`~/.fastcf/cf_ips.json`（主源 TYOYO1/CF-ASN `cf-asn-list.txt` 全量段，约 876 条；主源失败自动回退官方 `ips-v4`）
+- CF IPv4 段缓存：`~/.fastcf/cf_ips.json`（主源 TYOYO1/CF-ASN `cf-asn-list.txt` 全量段，约 877 条；主源失败自动回退官方 `ips-v4`）。
+  缓存 7 天内**不自动刷新**：若数据源升级后缓存仍是旧源（如官方 14 条大段），
+  界面状态栏的段数会偏小——在"IP 池管理"面板勾选"先刷新 CF 段缓存"（`init` 时 `refresh_cache: true`）即可强制更新。
+  下载走直连（绕系统代理），偶发 TLS 中断自动重试 3 次（退避 1s/2s）；
+  落盘为**原子写**（临时文件 + rename），主源直连持续失败回退官方源时磁盘与内存保持一致
 - colo 参考表：`~/.fastcf/colo_data.json`
 - 历史记录：`~/.fastcf/history.json`
 - IP 池：`~/.fastcf/ip_pools.json`

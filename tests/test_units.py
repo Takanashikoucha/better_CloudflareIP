@@ -182,6 +182,91 @@ def test_is_in_cf_v4():
     assert ipdata.is_in_cf_v4("192.0.2.1", ["badcidr", "192.0.2.0/24"])
 
 
+def test_first_ip_per_segment():
+    # 段首 IP（池初始化用）：取每段首个可用主机，.0 网络地址跳过，/31、/32 跳过，
+    # 重复首 IP 去重，非法行跳过（显式传 cidrs，不触网）
+    out = ipdata.first_ip_per_segment([
+        "192.0.2.0/24",        # → 192.0.2.1
+        "198.51.100.0/28",     # → 198.51.100.1
+        "203.0.113.0/31",      # /31 跳过（首地址是网络地址，不可靠）
+        "203.0.113.5/32",      # 单主机 /32 → 203.0.113.5
+        "192.0.2.128/25",      # → 192.0.2.129
+        "badcidr",             # 非法行，跳过
+        "198.51.100.0/28",     # 与上面重复段，首 IP 去重
+    ])
+    assert out == ["192.0.2.1", "198.51.100.1", "203.0.113.5", "192.0.2.129"], out
+    assert ipdata.first_ip_per_segment([]) == []
+    # 探测入口签名存在（实际拨号不测，离线）
+    assert callable(ipdata.segment_first_ips_probe)
+
+
+def test_direct_download_retries():
+    # _direct_download 偶发中断（TLS EOF / 读超时）自动重试：前 2 次失败、第 3 次成功。
+    # 直接调用 _direct_download（不经过 fetch_cf_ips），用 monkeypatch 的
+    # urllib.request.build_opener 制造"前 N 次连接失败"。
+    import urllib.request as _urllib
+    retry_calls = {"n": 0}
+    orig_build = _urllib.build_opener
+    orig_sleep = time.sleep
+
+    def fast_sleep(sec):  # 跳过真实退避等待
+        pass
+
+    class _FakeSock:
+        def settimeout(self, t):
+            pass
+    class _FakeResp:
+        fp = type("F", (), {"raw": type("R", (), {"_sock": _FakeSock()})()})()
+        def __enter__(self):
+            return self
+        def __exit__(self, *a):
+            pass
+        def read(self):
+            return b"192.0.2.0/24\n"
+
+    def flaky_opener(req, timeout=30):
+        # build_opener 返回一个 OpenerDirector（需有 .open 方法），
+        # 而不是直接返回响应。
+        class _Opener:
+            def open(self, r, timeout=30):
+                retry_calls["n"] += 1
+                if retry_calls["n"] < 3:
+                    raise ConnectionError("TLS EOF (第 %d 次)" % retry_calls["n"])
+                return _FakeResp()
+        return _Opener()
+
+    try:
+        _urllib.build_opener = lambda *a, **k: flaky_opener(None, timeout=30)
+        time.sleep = fast_sleep
+        out = ipdata._direct_download("https://example.invalid/cf", retries=3)
+        assert out.strip() == "192.0.2.0/24"
+        assert retry_calls["n"] == 3, f"期望 3 次（失败 2 + 成功 1），实际 {retry_calls['n']}"
+    finally:
+        time.sleep = orig_sleep
+        _urllib.build_opener = orig_build
+
+    # 重试耗尽仍失败 → 抛原异常
+    retry_calls["n"] = 0
+    def always_fail_opener(req, timeout=30):
+        class _Opener:
+            def open(self, r, timeout=30):
+                retry_calls["n"] += 1
+                raise ConnectionError("always down")
+        return _Opener()
+    try:
+        _urllib.build_opener = lambda *a, **k: always_fail_opener(None, timeout=30)
+        time.sleep = fast_sleep
+        try:
+            ipdata._direct_download("https://example.invalid/cf", retries=3)
+            assert False, "should raise"
+        except ConnectionError:
+            pass
+        assert retry_calls["n"] == 3, f"期望 3 次重试，实际 {retry_calls['n']}"
+    finally:
+        time.sleep = orig_sleep
+        _urllib.build_opener = orig_build
+
+
 def test_parse_cidr_lines():
     # 纯文本 CIDR 列表解析：忽略空行 / 注释 / 非法行
     out = ipdata._parse_cidr_lines("192.0.2.0/24\n\n# comment\nbadcidr\n 198.51.100.0/28 \n")

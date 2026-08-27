@@ -2,7 +2,7 @@
 """Cloudflare IPv4 段获取 / 缓存 / 采样。
 
 数据源（主）：[TYOYO1/CF-ASN](https://github.com/TYOYO1/CF-ASN) 的
-cf-asn-list.txt（AS13335 + AS209242 全量 CIDR，约 876 条，含大量 /23、/24，
+cf-asn-list.txt（AS13335 + AS209242 全量 CIDR，约 877 条，含大量 /23、/24，
 覆盖官方 ips-v4 之外散布的各 DC 子网，随机采样空间更大）。
 数据源（备）：https://www.cloudflare.com/ips-v4（14 条大段，主源失败时兜底）。
 缓存 7 天，过期自动刷新；主源失败自动回退官方源。
@@ -25,15 +25,28 @@ CF_IPS_URLS = [
 CACHE_TTL = 7 * 86400  # 7 天
 
 
-def _direct_download(url, timeout=30):
-    """绕过代理直连下载（socket 级超时，防止慢速连接挂死）。"""
+def _direct_download(url, timeout=30, retries=3):
+    """绕过代理直连下载（socket 级超时，防止慢速连接挂死）。
+
+    网络偶发中断（TLS EOF / 读超时）时重试：最多 retries 次，
+    退避 1s、2s；全部失败才抛异常。
+    """
     import socket
+    import time as _time
     import urllib.request
-    req = urllib.request.Request(url, headers={"User-Agent": "FastCF/1.0"})
-    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-    with opener.open(req, timeout=timeout) as r:
-        r.fp.raw._sock.settimeout(timeout)  # socket 读超时
-        return r.read().decode("utf-8", "ignore")
+    last_err = None
+    for attempt in range(retries):
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "FastCF/1.0"})
+            opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+            with opener.open(req, timeout=timeout) as r:
+                r.fp.raw._sock.settimeout(timeout)  # socket 读超时
+                return r.read().decode("utf-8", "ignore")
+        except Exception as e:
+            last_err = e
+            if attempt < retries - 1:
+                _time.sleep(1 + attempt)
+    raise last_err
 
 
 def _parse_cidr_lines(text: str) -> list:
@@ -72,7 +85,11 @@ def fetch_cf_ips(force=False) -> dict:
                 continue
             out = {"ts": time.time(), "v4": v4, "source": url}
             try:
-                CF_IPS_CACHE.write_text(json.dumps(out))
+                # 原子写：先写临时文件再 rename，避免中途失败留下截断/陈旧缓存
+                # （非原子写失败过：内存是 877 条、磁盘却停在 15 条，界面一直显示 15）
+                tmp = CF_IPS_CACHE.with_suffix(".json.tmp")
+                tmp.write_text(json.dumps(out))
+                tmp.replace(CF_IPS_CACHE)
             except Exception:
                 pass  # 落盘失败不影响本次返回
             return out
@@ -116,6 +133,52 @@ def v4_prefixes(net, plen=24):
         return
     for prefix in net.subnets(new_prefix=plen):
         yield prefix
+
+
+# ── 段首 IP 探测（池初始化）──
+
+def first_ip_per_segment(cidrs: list = None) -> list:
+    """每个 CF IPv4 段取首个可用主机 IP（.0 网络地址与 /31、/32 跳过）。
+
+    cidrs 缺省用缓存/现取的段列表。TYOYO1/CF-ASN 全量段约 877 个 → 约 877 个首 IP。
+    /31 段跳过（CPython 3.9+ 的 hosts() 把两端地址都当可用主机，/31 首地址是网络地址，
+    不适合探测）；/32 单主机段保留。
+    """
+    if cidrs is None:
+        cidrs = fetch_cf_ips().get("v4", [])
+    out = []
+    seen = set()
+    for c in cidrs:
+        try:
+            net = ipaddress.ip_network(c, strict=False)
+        except ValueError:
+            continue
+        if net.prefixlen == 31:
+            continue  # /31 不可靠（两端地址角色因实现而异），不取
+        hosts = list(net.hosts())
+        if not hosts:
+            continue  # 理论不可达（/31 已提前跳过），防御性保留
+        first = str(hosts[0])
+        if first not in seen:
+            seen.add(first)
+            out.append(first)
+    return out
+
+
+def segment_first_ips_probe(workers: int = 20, log=None) -> dict:
+    """池初始化：对每个 CF IPv4 段的首个 IP 并发探测实际服务节点（cf-meta-colo）并入池。
+
+    复用 pools.probe_and_add（首 IP 必在 CF 段内，段校验恒通过）。
+    返回 probe_and_add 的结果 + 探测的 IP 总数。
+    """
+    from . import pools  # 延迟导入避免循环依赖
+
+    ips = first_ip_per_segment()
+    if log:
+        log(f"段首 IP 探测：{len(ips)} 个（每段首个 IP，并发 {workers}）")
+    res = pools.probe_and_add(ips, "", use_tls=True, workers=workers, log=log)
+    res["total"] = len(ips)
+    return res
 
 
 # ── 采样 ──

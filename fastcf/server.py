@@ -219,6 +219,7 @@ class FastCFHandler(BaseHTTPRequestHandler):
                 "data_dir": str(d),
                 "cf_cache": d.joinpath("cf_ips.json").stat().st_size if d.joinpath("cf_ips.json").exists() else 0,
                 "cf_cidrs": len(ipdata.fetch_cf_ips().get("v4", [])),
+                "cf_source": ipdata.fetch_cf_ips().get("source", ""),
                 "pool_dc": len(rep),
                 "pool_ips": sum(rep.values()),
                 "pool_expired": pools.expired(),
@@ -271,6 +272,22 @@ class FastCFHandler(BaseHTTPRequestHandler):
                     self._json({"error": "缺少 ips"}, 400)
                     return
                 res = pools.probe_and_add(ips, code, use_tls=True, workers=12)
+                self._json({"ok": True, **res})
+            elif act == "init":
+                # 池初始化：对每个 CF IPv4 段的首个 IP 并发探测 cf-meta-colo 并入池。
+                # refresh_cache=true 时先强制刷新段缓存（绕 7 天 TTL，主源 TYOYO1/CF-ASN
+                # 失败自动回退官方 ips-v4）；段缓存过旧（如仍为官方 14 条大段）时建议勾选。
+                if body.get("refresh_cache"):
+                    try:
+                        ipdata.fetch_cf_ips(force=True)
+                    except Exception as e:
+                        self._json({"error": f"CF 段缓存刷新失败：{e}"}, 502)
+                        return
+                try:
+                    res = ipdata.segment_first_ips_probe(workers=20)
+                except Exception as e:
+                    self._json({"error": f"段首 IP 探测失败：{e}"}, 502)
+                    return
                 self._json({"ok": True, **res})
             else:
                 self._json({"error": "bad action"}, 400)
