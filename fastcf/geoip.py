@@ -187,16 +187,24 @@ def colo_country(code: str):
     return v[0].upper() if v and v[0] else None
 
 
-def colo_list_by_cc() -> dict:
-    """按 ISO 国家码分组的 colo：{cc: [{code, name}, ...]}，组内按 code 排序。"""
+def colo_list_by_cc() -> list:
+    """按国家分组的 colo 列表：[{cc, cc_zh, items: [{code, name}, ...]}, ...]。
+
+    items 组内按 code 排序；组按国家中文名排序，中国（含港澳台）置顶。
+    返回 list（JSON 友好，可直接下发前端）。
+    """
     out: dict = {}
     with _colo_lock:
         for code, (cca2, name) in _colo.items():
             if cca2:
                 out.setdefault(cca2, []).append({"code": code, "name": name})
-    for cc in out:
-        out[cc].sort(key=lambda x: x["code"])
-    return dict(sorted(out.items()))
+    groups = []
+    for cc, items in out.items():
+        items.sort(key=lambda x: x["code"])
+        groups.append({"cc": cc, "cc_zh": COUNTRY_ZH.get(cc, cc), "items": items})
+    _CN = ("CN", "HK", "MO", "TW")
+    groups.sort(key=lambda g: (0 if g["cc"] in _CN else 1, g["cc_zh"], g["cc"]))
+    return groups
 
 
 def colo_count() -> int:

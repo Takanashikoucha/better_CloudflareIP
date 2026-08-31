@@ -41,8 +41,12 @@ def main():
     srv, port = server.start(args.host, args.port)
     url = f"http://{args.host}:{port}"
 
-    # 后台预热：刷新 colo 参考数据（3 天 TTL，失败沿用内置快照）
+    # 后台预热：colo 参考数据 + 双源 IP 缓存（均带 TTL，失败沿用旧缓存/快照）
+    from fastcf import ipdata
+    import threading
     geoip.preload()
+    threading.Thread(target=ipdata.fetch_cf_ips, daemon=True).start()
+    threading.Thread(target=ipdata.fetch_external_ips, daemon=True).start()
 
     print("=" * 56)
     print(f"  FastCF v{__version__} — Cloudflare IP 优选")

@@ -1,4 +1,4 @@
 # FastCF 零第三方依赖
 # 仅需 Python 3.10+ 标准库（ssl / socket / ipaddress / http.server / json / threading / concurrent.futures / subprocess）
 # 依赖系统命令：ping（ICMP 预筛，Linux 默认自带）
-# 所有数据（CF 官方 IPv4 段、colo 参考表）均为运行时在线获取 + 本地缓存，无需 pip install
+# 所有数据（CF 官方 IPv4 段、外部 IP 清单 zip.cm.edu.kg/all.txt、colo 参考表）均为运行时在线获取 + 本地缓存，无需 pip install

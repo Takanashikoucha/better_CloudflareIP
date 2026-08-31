@@ -79,18 +79,24 @@ class ScanManager:
 
     @property
     def running(self):
+        # 以 done 事件为准（消除对 last_state 首次 emit 时序的依赖）：
+        # 扫描器存在且尚未结束 = 运行中
         with self.lock:
-            return bool(self.scanner and self.scanner.last_state
-                        and self.scanner.last_state.get("running"))
+            return bool(self.scanner and not self.scanner.done.is_set())
 
 
 manager = ScanManager()
 
 
-def _read_html():
-    # 页脚版本号与包版本保持单一来源
-    return (WEB_DIR / "index.html").read_text(encoding="utf-8").replace(
+# 静态资源启动时读入内存（内容小），避免每请求读盘；版本号单一来源替换在启动时完成
+_STATIC: dict = {}
+
+
+def _load_static():
+    _STATIC["/"] = (WEB_DIR / "index.html").read_text(encoding="utf-8").replace(
         "v__VERSION__", f"v{__version__}")
+    _STATIC["/app.js"] = (WEB_DIR / "app.js").read_text(encoding="utf-8")
+    _STATIC["/style.css"] = (WEB_DIR / "style.css").read_text(encoding="utf-8")
 
 
 class FastCFHandler(BaseHTTPRequestHandler):
@@ -118,6 +124,8 @@ class FastCFHandler(BaseHTTPRequestHandler):
 
     def _body_json(self) -> dict:
         ln = int(self.headers.get("Content-Length") or 0)
+        if ln > 1_000_000:  # 防异常大 body
+            return {}
         raw = self.rfile.read(ln) if ln else b"{}"
         try:
             return json.loads(raw.decode() or "{}")
@@ -129,14 +137,10 @@ class FastCFHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         path = self.path.split("?")[0]
         if path in ("/", "/index.html"):
-            self._send(_read_html().encode(), "text/html; charset=utf-8")
+            self._send(_STATIC["/"].encode(), "text/html; charset=utf-8")
         elif path in ("/app.js", "/style.css"):
-            f = WEB_DIR / path.lstrip("/")
-            if f.exists():
-                ctype = "text/javascript" if f.suffix == ".js" else "text/css"
-                self._send(f.read_bytes(), f"{ctype}; charset=utf-8")
-            else:
-                self._json({"error": "not found"}, 404)
+            ctype = "text/javascript" if path.endswith(".js") else "text/css"
+            self._send(_STATIC[path].encode(), f"{ctype}; charset=utf-8")
         elif path == "/api/status":
             with manager.lock:
                 sc = manager.scanner
@@ -154,22 +158,18 @@ class FastCFHandler(BaseHTTPRequestHandler):
         elif path == "/api/stream":
             self._sse()
         elif path == "/api/colos":
-            # 国家分组 + 各国家节点列表/IP 池大小，供前端下拉框
-            by_cc = geoip.colo_list_by_cc()
+            # 国家分组（中国系置顶）+ 各节点池大小，供前端下拉框
             report = pools.pool_report()
-            out = []
-            for cc, colos in by_cc.items():
-                out.append({
-                    "cc": cc,
-                    "cc_zh": geoip.country_zh(cc),
-                    "count": len(colos),
-                    "pool": sum(report.get(c["code"], 0) for c in colos),
-                    "codes": [c["code"] for c in colos],
-                    "items": [{"code": c["code"], "name": c["name"],
-                               "pool": report.get(c["code"], 0)} for c in colos],
+            groups = []
+            for g in geoip.colo_list_by_cc():
+                groups.append({
+                    "cc": g["cc"],
+                    "cc_zh": g["cc_zh"],
+                    "count": len(g["items"]),
+                    "pool": sum(report.get(i["code"], 0) for i in g["items"]),
+                    "items": [{**i, "pool": report.get(i["code"], 0)} for i in g["items"]],
                 })
-            out.sort(key=lambda x: x["cc_zh"])
-            self._json(out)
+            self._json(groups)
         elif path == "/api/export":
             # ?fmt=csv|json&source=latest|history&history_id=N
             qs = self.path.split("?", 1)[1] if "?" in self.path else ""
@@ -211,15 +211,19 @@ class FastCFHandler(BaseHTTPRequestHandler):
         elif path == "/api/pools":
             self._json(pools.pools_detail())
         elif path == "/api/data-status":
-            # 数据目录 / 池统计 概要，供前端信息栏
+            # 数据目录 / 双源缓存 / 池统计 概要，供前端信息栏
             d = geoip.DATA_DIR
             rep = pools.pool_report()
+            src = ipdata.sources_status()
             st = {
                 "version": __version__,
                 "data_dir": str(d),
-                "cf_cache": d.joinpath("cf_ips.json").stat().st_size if d.joinpath("cf_ips.json").exists() else 0,
-                "cf_cidrs": len(ipdata.fetch_cf_ips().get("v4", [])),
-                "cf_source": ipdata.fetch_cf_ips().get("source", ""),
+                "cf_cidrs": src["official"]["n"],
+                "cf_ts": src["official"]["ts"],
+                "cf_source": src["official"]["source"],
+                "ext_ips": src["external"]["n"],
+                "ext_ts": src["external"]["ts"],
+                "ext_source": src["external"]["source"],
                 "pool_dc": len(rep),
                 "pool_ips": sum(rep.values()),
                 "pool_expired": pools.expired(),
@@ -299,6 +303,18 @@ class FastCFHandler(BaseHTTPRequestHandler):
     def _sse(self):
         with manager.lock:
             sc = manager.scanner
+        # 竞态：扫描已结束（done）→ 直接下发最终态并关闭，避免空等 ping
+        if sc is not None and sc.done.is_set():
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Connection", "close")
+            self.end_headers()
+            final = sc.last_state or {"running": False, "stage": "done", "pct": 100}
+            self.wfile.write(b"data: " + json.dumps(final, ensure_ascii=False).encode() + b"\n\n")
+            self.wfile.flush()
+            return
+
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Cache-Control", "no-store")
@@ -374,5 +390,6 @@ def run_server(host: str, port: int) -> ThreadingHTTPServer:
 
 def start(host: str, port: int = 0) -> tuple[ThreadingHTTPServer, int]:
     """启动监听并返回 (server, 实际端口)。port=0 自动分配；监听失败抛 OSError。"""
+    _load_static()
     port = find_free_port(port or None, host=host)
     return run_server(host, port), port

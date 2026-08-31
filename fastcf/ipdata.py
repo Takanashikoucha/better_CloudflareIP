@@ -1,28 +1,31 @@
 # -*- coding: utf-8 -*-
-"""Cloudflare IPv4 段获取 / 缓存 / 采样。
+"""Cloudflare IPv4 IP 来源：官方段 + 外部清单，双源合并采样。
 
-数据源（主）：[TYOYO1/CF-ASN](https://github.com/TYOYO1/CF-ASN) 的
-cf-asn-list.txt（AS13335 + AS209242 全量 CIDR，约 877 条，含大量 /23、/24，
-覆盖官方 ips-v4 之外散布的各 DC 子网，随机采样空间更大）。
-数据源（备）：https://www.cloudflare.com/ips-v4（14 条大段，主源失败时兜底）。
-缓存 7 天，过期自动刷新；主源失败自动回退官方源。
+数据源（双源，50/50 合并随机）：
+  1. 官方段：https://www.cloudflare.com/ips-v4（14 条大段，CIDR 列表）
+     —— 缓存 ~/.fastcf/cf_ips.json，7 天 TTL
+  2. 外部清单：https://zip.cm.edu.kg/all.txt（约 1.7 万条 IP:PORT#国家 标签，
+     仅保留 443 端口条目，去重后为纯 IPv4 列表）
+     —— 缓存 ~/.fastcf/ext_ips.json，7 天 TTL；拉取失败退化为仅官方源
+采样：sample_cf_ips(count) 两源各取约 count/2，官方侧 /24 分层随机、
+清单侧直接随机，按 IP 去重。
 """
 import ipaddress
 import json
 import os
 import random
+import re
 import time
 from pathlib import Path
 
 DATA_DIR = Path(os.environ.get("FASTCF_HOME", str(Path.home() / ".fastcf")))
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 CF_IPS_CACHE = DATA_DIR / "cf_ips.json"
+EXT_IPS_CACHE = DATA_DIR / "ext_ips.json"
 
-CF_IPS_URLS = [
-    "https://raw.githubusercontent.com/TYOYO1/CF-ASN/main/cf-asn-list.txt",  # 主源：全量 ASN 段
-    "https://www.cloudflare.com/ips-v4",                                    # 备源：官方段
-]
-CACHE_TTL = 7 * 86400  # 7 天
+CF_IPS_URL = "https://www.cloudflare.com/ips-v4"     # 官方段（CIDR）
+EXT_IPS_URL = "https://zip.cm.edu.kg/all.txt"        # 外部 IP 清单（IP:PORT#CC）
+CACHE_TTL = 7 * 86400  # 两源缓存均为 7 天
 
 
 def _direct_download(url, timeout=30, retries=3):
@@ -31,7 +34,6 @@ def _direct_download(url, timeout=30, retries=3):
     网络偶发中断（TLS EOF / 读超时）时重试：最多 retries 次，
     退避 1s、2s；全部失败才抛异常。
     """
-    import socket
     import time as _time
     import urllib.request
     last_err = None
@@ -40,13 +42,22 @@ def _direct_download(url, timeout=30, retries=3):
             req = urllib.request.Request(url, headers={"User-Agent": "FastCF/1.0"})
             opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
             with opener.open(req, timeout=timeout) as r:
-                r.fp.raw._sock.settimeout(timeout)  # socket 读超时
                 return r.read().decode("utf-8", "ignore")
         except Exception as e:
             last_err = e
             if attempt < retries - 1:
                 _time.sleep(1 + attempt)
     raise last_err
+
+
+def _atomic_write(path: Path, obj: dict):
+    """原子落盘（临时文件 + rename），避免中途失败留下截断/陈旧缓存。"""
+    try:
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        tmp.write_text(json.dumps(obj))
+        tmp.replace(path)
+    except Exception:
+        pass  # 落盘失败不影响本次返回
 
 
 def _parse_cidr_lines(text: str) -> list:
@@ -64,10 +75,43 @@ def _parse_cidr_lines(text: str) -> list:
     return out
 
 
-def fetch_cf_ips(force=False) -> dict:
-    """获取并缓存 Cloudflare IPv4 段。返回 {'v4': [cidr...], 'ts': ..., 'source': url}
+_EXT_LINE = re.compile(r"^(\d{1,3}(?:\.\d{1,3}){3}):(\d+)(?:#([A-Za-z]{2}))?\s*$")
 
-    按 CF_IPS_URLS 顺序尝试（主源 TYOYO1/CF-ASN，备源官方 ips-v4），全部失败抛异常。
+
+def parse_ext_lines(text: str) -> tuple:
+    """解析外部清单（每行 `IP:PORT#CC`）。
+
+    仅保留 443 端口、合法 IPv4 条目（其余端口与非法行静默跳过），
+    按出现顺序去重。返回 (ips, kept, skipped)。
+    """
+    ips, seen, kept, skipped = [], set(), 0, 0
+    for line in text.splitlines():
+        m = _EXT_LINE.match(line.strip())
+        if not m:
+            skipped += 1
+            continue
+        ip_s, port = m.group(1), m.group(2)
+        if int(port) != 443:
+            skipped += 1
+            continue
+        try:
+            a = ipaddress.ip_address(ip_s)
+        except ValueError:
+            skipped += 1
+            continue
+        if a.version != 4 or ip_s in seen:
+            skipped += 1
+            continue
+        seen.add(ip_s)
+        ips.append(ip_s)
+        kept += 1
+    return ips, kept, skipped
+
+
+def fetch_cf_ips(force=False) -> dict:
+    """获取并缓存官方 CF IPv4 段。返回 {'v4': [cidr...], 'ts': ..., 'source': url}。
+
+    缓存 7 天内直接复用；过期或 force 时重新下载，失败沿用旧缓存。
     """
     if not force and CF_IPS_CACHE.exists():
         try:
@@ -76,32 +120,73 @@ def fetch_cf_ips(force=False) -> dict:
                 return cached
         except Exception:
             pass
-    last_err = None
-    for url in CF_IPS_URLS:
-        try:
-            v4 = _parse_cidr_lines(_direct_download(url))
-            if not v4:
-                last_err = f"{url} 返回空列表"
-                continue
-            out = {"ts": time.time(), "v4": v4, "source": url}
-            try:
-                # 原子写：先写临时文件再 rename，避免中途失败留下截断/陈旧缓存
-                # （非原子写失败过：内存是 877 条、磁盘却停在 15 条，界面一直显示 15）
-                tmp = CF_IPS_CACHE.with_suffix(".json.tmp")
-                tmp.write_text(json.dumps(out))
-                tmp.replace(CF_IPS_CACHE)
-            except Exception:
-                pass  # 落盘失败不影响本次返回
+    try:
+        v4 = _parse_cidr_lines(_direct_download(CF_IPS_URL))
+        if v4:
+            out = {"ts": time.time(), "v4": v4, "source": CF_IPS_URL}
+            _atomic_write(CF_IPS_CACHE, out)
             return out
-        except Exception as e:
-            last_err = f"{url}: {e}"
-    raise RuntimeError(f"所有 CF IPv4 段数据源均获取失败：{last_err}")
+    except Exception:
+        pass
+    # 下载失败：沿用旧缓存（哪怕过期），彻底没有才抛异常
+    if CF_IPS_CACHE.exists():
+        try:
+            cached = json.loads(CF_IPS_CACHE.read_text())
+            if cached.get("v4"):
+                return cached
+        except Exception:
+            pass
+    raise RuntimeError(f"官方 CF IPv4 段获取失败（{CF_IPS_URL}）")
 
 
-# ── 段归属校验 ──
+def fetch_external_ips(force=False) -> dict:
+    """获取并缓存外部 IP 清单（仅 443 端口、去重后的 IPv4 列表）。
+
+    返回 {'v4': [ip...], 'ts': ..., 'source': url, 'kept': n, 'skipped': n}。
+    缓存 7 天内直接复用；过期或 force 时重新下载，失败沿用旧缓存。
+    """
+    if not force and EXT_IPS_CACHE.exists():
+        try:
+            cached = json.loads(EXT_IPS_CACHE.read_text())
+            if time.time() - cached.get("ts", 0) < CACHE_TTL and cached.get("v4"):
+                return cached
+        except Exception:
+            pass
+    try:
+        ips, kept, skipped = parse_ext_lines(_direct_download(EXT_IPS_URL))
+        if ips:
+            out = {"ts": time.time(), "v4": ips, "source": EXT_IPS_URL,
+                   "kept": kept, "skipped": skipped}
+            _atomic_write(EXT_IPS_CACHE, out)
+            return out
+    except Exception:
+        pass
+    if EXT_IPS_CACHE.exists():
+        try:
+            cached = json.loads(EXT_IPS_CACHE.read_text())
+            if cached.get("v4"):
+                return cached
+        except Exception:
+            pass
+    raise RuntimeError(f"外部 IP 清单获取失败（{EXT_IPS_URL}）")
+
+
+def sources_status() -> dict:
+    """两源缓存概要（不触网）：供前端数据状态展示。"""
+    def _info(path: Path) -> dict:
+        try:
+            d = json.loads(path.read_text())
+            return {"n": len(d.get("v4", [])), "ts": d.get("ts", 0),
+                    "source": d.get("source", "")}
+        except Exception:
+            return {"n": 0, "ts": 0, "source": ""}
+    return {"official": _info(CF_IPS_CACHE), "external": _info(EXT_IPS_CACHE)}
+
+
+# ── 段归属 / 已知 IP 校验 ──
 
 def is_in_cf_v4(ip: str, cidrs: list = None) -> bool:
-    """判断 IPv4 是否落在 CF 段内（cidrs 缺省用缓存/现取的官方段）。"""
+    """判断 IPv4 是否落在官方 CF 段内（cidrs 缺省用缓存/现取的官方段）。"""
     if cidrs is None:
         cidrs = fetch_cf_ips().get("v4", [])
     try:
@@ -117,6 +202,22 @@ def is_in_cf_v4(ip: str, cidrs: list = None) -> bool:
         except ValueError:
             continue
     return False
+
+
+def is_known_ip(ip: str, cidrs: list = None, ext_ips: list = None) -> bool:
+    """判断 IP 是否为已知合法来源：官方 CF 段内 或 外部清单（443 条目）中。
+
+    供手动入池校验使用；cidrs/ext_ips 缺省时取缓存（不触网，缓存缺失才现取）。
+    """
+    ip = ip.strip()
+    if is_in_cf_v4(ip, cidrs):
+        return True
+    if ext_ips is None:
+        try:
+            ext_ips = fetch_external_ips().get("v4", [])
+        except Exception:
+            ext_ips = []
+    return ip in set(ext_ips)
 
 
 # ── IPv4 前缀工具 ──
@@ -138,9 +239,9 @@ def v4_prefixes(net, plen=24):
 # ── 段首 IP 探测（池初始化）──
 
 def first_ip_per_segment(cidrs: list = None) -> list:
-    """每个 CF IPv4 段取首个可用主机 IP（.0 网络地址与 /31、/32 跳过）。
+    """每个官方 CF IPv4 段取首个可用主机 IP（.0 网络地址与 /31、/32 跳过）。
 
-    cidrs 缺省用缓存/现取的段列表。TYOYO1/CF-ASN 全量段约 877 个 → 约 877 个首 IP。
+    cidrs 缺省用缓存/现取的段列表（官方段仅 14 条 → 约 14 个首 IP）。
     /31 段跳过（CPython 3.9+ 的 hosts() 把两端地址都当可用主机，/31 首地址是网络地址，
     不适合探测）；/32 单主机段保留。
     """
@@ -166,7 +267,7 @@ def first_ip_per_segment(cidrs: list = None) -> list:
 
 
 def segment_first_ips_probe(workers: int = 20, log=None) -> dict:
-    """池初始化：对每个 CF IPv4 段的首个 IP 并发探测实际服务节点（cf-meta-colo）并入池。
+    """池初始化：对每个官方 CF IPv4 段的首个 IP 并发探测实际服务节点（cf-meta-colo）并入池。
 
     复用 pools.probe_and_add（首 IP 必在 CF 段内，段校验恒通过）。
     返回 probe_and_add 的结果 + 探测的 IP 总数。
@@ -175,26 +276,112 @@ def segment_first_ips_probe(workers: int = 20, log=None) -> dict:
 
     ips = first_ip_per_segment()
     if log:
-        log(f"段首 IP 探测：{len(ips)} 个（每段首个 IP，并发 {workers}）")
+        log(f"段首 IP 探测：{len(ips)} 个（官方段每段首个 IP，并发 {workers}）")
     res = pools.probe_and_add(ips, "", use_tls=True, workers=workers, log=log)
     res["total"] = len(ips)
     return res
 
 
-# ── 采样 ──
+# ── 双源合并采样 ──
+
+def _expand_sample(cidrs, target: int):
+    """从 CIDR 列表按 /24 前缀分层随机采样，最多取 target 个（不展开全量）。
+
+    每个 /24 块内随机取 1–3 个主机，多轮 shuffle 遍历，够数即停。
+    """
+    if target <= 0:
+        return []
+    nets = []
+    for c in cidrs:
+        try:
+            net = ipaddress.ip_network(c, strict=False)
+        except ValueError:
+            continue
+        if net.version == 4:
+            nets.append(net)
+    if not nets:
+        return []
+
+    blocks = []
+    for n in nets:
+        if n.prefixlen > 24:
+            blocks.append(n)
+        elif n.prefixlen < 24:
+            blocks.extend(n.subnets(new_prefix=24))
+        else:
+            blocks.append(n)
+    if not blocks:
+        return []
+
+    ips = []
+    while len(ips) < target * 3:  # 多采一点供上游去重，上限 target*3
+        random.shuffle(blocks)
+        progressed = False
+        for net in blocks:
+            hosts = list(net.hosts())
+            if not hosts:
+                continue
+            take = min(3, len(hosts))
+            for h in random.sample(hosts, take):
+                s = str(h)
+                if s not in ips:
+                    ips.append(s)
+                    progressed = True
+                    if len(ips) >= target * 3:
+                        break
+        if not progressed:
+            break
+    return ips
+
 
 def sample_cf_ips(count: int, use_v6: bool = False) -> list:
-    """从 CF IPv4 段（TYOYO1/CF-ASN 全量段，主源失败回退官方 ips-v4）随机采样 count 个 IP（按 /24 前缀分层随机，不展开全量）。
+    """双源合并随机采样 count 个 IPv4：外部清单（443 条目）约一半 + 官方段（/24 分层）补满。
 
+    按 IP 去重（清单 IP 理论上可能落在官方段内）；某源缺失时另一源补满。
     use_v6 参数保留仅为向后兼容旧调用，v6 已不支持，忽略。
     """
-    raw = fetch_cf_ips()
-    return _expand_sample(raw["v4"], 4)[:count]
+    target = max(1, int(count))
+    half = (target + 1) // 2
+
+    off, ext, pool = [], [], []
+    try:
+        pool = fetch_external_ips().get("v4", [])
+        ext = random.sample(pool, min(half, len(pool))) if pool else []
+    except Exception:
+        ext = []
+    try:
+        off = _expand_sample(fetch_cf_ips().get("v4", []), target)
+    except Exception:
+        off = []
+
+    # 合并去重：先外部清单（配额小、保证全部入选），再官方分层采样补满
+    merged, seen = [], set()
+    for ip in ext:
+        if ip not in seen:
+            merged.append(ip)
+            seen.add(ip)
+    for ip in off:
+        if ip not in seen:
+            merged.append(ip)
+            seen.add(ip)
+        if len(merged) >= target:
+            break
+    if len(merged) < target:
+        # 官方分层块不足以补满（如段极小）→ 从清单剩余 IP 中补
+        rest = [i for i in pool if i not in seen]
+        random.shuffle(rest)
+        for ip in rest:
+            merged.append(ip)
+            seen.add(ip)
+            if len(merged) >= target:
+                break
+    random.shuffle(merged)
+    return merged[:target]
 
 
 def probe_location(ip: str, use_tls=True, timeout=4):
     """
-    对单个 IP 发一个极小流量请求（1MB），读 CF 返回的**实际服务地**。
+    对单个 IP 发一个极小流量请求（64KB，读头即断连），读 CF 返回的**实际服务地**。
 
     CF 的 IP 是全球共享池，注册归属地 ≠ 实际服务地。
     speed.cloudflare.com/__down 响应头里的 cf-meta-country / city / colo
@@ -210,14 +397,12 @@ def probe_location(ip: str, use_tls=True, timeout=4):
     try:
         sock = socket.create_connection((ip, port), timeout=timeout)
         if use_tls:
-            ctx = ssl.create_default_context()
-            ctx.check_hostname = False
-            ctx.verify_mode = ssl.CERT_NONE
+            ctx = _ssl_ctx()
             conn = ctx.wrap_socket(sock, server_hostname=host)
         else:
             conn = sock
         conn.settimeout(timeout + 4)
-        req = (f"GET /__down?bytes=1048576 HTTP/1.1\r\n"
+        req = (f"GET /__down?bytes=65536 HTTP/1.1\r\n"
                f"Host: {host}\r\nUser-Agent: Mozilla/5.0 (FastCF)\r\n"
                f"Connection: close\r\n\r\n").encode()
         conn.sendall(req)
@@ -251,47 +436,16 @@ def probe_location(ip: str, use_tls=True, timeout=4):
                 pass
 
 
-def _expand_sample(cidrs, want_ver):
-    """从 CIDR 列表直接采样（不展开全量）：v4 按 /24、v6 按 /48 前缀分层，
-    每个前缀块内随机取主机；随机前缀重复取若干轮，保证随机性又避免枚举数百万 IP。
+_SSL_CTX = None
 
-    用 ipaddress 的 .hosts() 生成器取随机主机（C 层字符串操作，不用整数算术）。
-    """
-    nets = []
-    for c in cidrs:
-        try:
-            net = ipaddress.ip_network(c, strict=False)
-        except ValueError:
-            continue
-        if net.version == want_ver:
-            nets.append(net)
-    if not nets:
-        return []
 
-    # 按目标子网分层
-    target_plen = 24 if want_ver == 4 else 48
-    blocks = []
-    for n in nets:
-        if n.prefixlen > target_plen:
-            blocks.append(n)
-        elif n.prefixlen < target_plen:
-            blocks.extend(n.subnets(new_prefix=target_plen))
-        else:
-            blocks.append(n)
-    if not blocks:
-        return []
-
-    # 每块随机取 1-3 个主机，重复 3 轮
-    ips = []
-    for _ in range(3):
-        random.shuffle(blocks)
-        for net in blocks:
-            hosts = list(net.hosts())
-            if not hosts:
-                continue
-            take = min(3, len(hosts))
-            for h in random.sample(hosts, take):
-                ips.append(str(h))
-                if len(ips) >= 5000:
-                    return ips
-    return ips
+def _ssl_ctx():
+    """进程级单例 SSL 上下文（跳过主机名校验/证书校验，仅用于读响应头）。"""
+    global _SSL_CTX
+    if _SSL_CTX is None:
+        import ssl
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        _SSL_CTX = ctx
+    return _SSL_CTX

@@ -6,7 +6,7 @@
 **实际命中的那个 DC**（无目标过滤）。
 
 入池途径（无后台线程，全部前台/事件性）：
-  1. 手动探测并添加（probe_and_add：CF IPv4 段校验（TYOYO1/CF-ASN 全量段）+ cf-meta-colo 归池）
+  1. 手动探测并添加（probe_and_add：已知来源校验（官方 CF 段 ∪ 外部 443 清单）+ cf-meta-colo 归池）
   2. 扫描中随机 IP 测速前探测入池
   3. 测速成功的 IP 回写其实际 DC
 
@@ -49,11 +49,15 @@ def _load():
 
 
 def _save():
+    # 原子写（临时文件 + rename），防止写一半留下损坏 JSON
     try:
         DATA_DIR.mkdir(parents=True, exist_ok=True)
-        POOL_FILE.write_text(json.dumps(
+        payload = json.dumps(
             {"ts": time.time(),
-             "pools": {k: {"ips": v, "ts": _pool_ts.get(k, 0)} for k, v in (_pool or {}).items()}}))
+             "pools": {k: {"ips": v, "ts": _pool_ts.get(k, 0)} for k, v in (_pool or {}).items()}})
+        tmp = POOL_FILE.with_suffix(".json.tmp")
+        tmp.write_text(payload)
+        tmp.replace(POOL_FILE)
     except Exception:
         pass
 
@@ -134,6 +138,15 @@ def all_codes() -> list:
     return list((_pool or {}).keys())
 
 
+def locate(ip: str) -> str:
+    """返回 IP 所属 DC 的 code（不区分大小写查找）；不在任何池中返回 ""。"""
+    _ensure_loaded()
+    for code, ips in (_pool or {}).items():
+        if ip in ips:
+            return code
+    return ""
+
+
 def pool_report() -> dict:
     """池统计：{code: n}。"""
     _ensure_loaded()
@@ -197,7 +210,7 @@ def probe_and_add(ips: list, code_hint: str = "", use_tls: bool = True,
                   workers: int = 12, log=None) -> dict:
     """手动补充 IP 入池（手动探测并添加功能）：
 
-    1. CF IPv4 段校验（TYOYO1/CF-ASN 全量段为主、官方 ips-v4 兜底；不在段内 → rejected）
+    1. 已知来源校验（官方 CF 段 ∪ 外部 443 清单；都不在 → rejected）
     2. 并发探测 cf-meta-colo 实际服务节点
        - code_hint 为空：按实际 colo 归池
        - code_hint 非空：结果必须匹配，否则 mismatch
@@ -205,6 +218,10 @@ def probe_and_add(ips: list, code_hint: str = "", use_tls: bool = True,
     import concurrent.futures as cfu
 
     cidrs = ipdata.fetch_cf_ips().get("v4", [])
+    try:
+        ext_ips = ipdata.fetch_external_ips().get("v4", [])
+    except Exception:
+        ext_ips = []
 
     details = []
     pending = []
@@ -212,8 +229,9 @@ def probe_and_add(ips: list, code_hint: str = "", use_tls: bool = True,
         ip = raw.strip()
         if not ip:
             continue
-        if not ipdata.is_in_cf_v4(ip, cidrs):
-            details.append({"ip": ip, "ok": False, "reason": "不在 CF IPv4 段"})
+        if not ipdata.is_known_ip(ip, cidrs, ext_ips):
+            details.append({"ip": ip, "ok": False,
+                            "reason": "非已知来源（不在官方 CF 段或外部 443 清单）"})
             continue
         pending.append(ip)
 

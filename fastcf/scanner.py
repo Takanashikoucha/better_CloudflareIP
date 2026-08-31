@@ -22,7 +22,6 @@
 import random
 import re
 import socket
-import ssl
 import subprocess
 import threading
 import time
@@ -37,20 +36,27 @@ PING_LAT_FACTOR = 2.0   # 平均时延 > 2× 最佳时延 淘汰
 LOSS_CUTOFF = 0.75      # 丢包 ≥75% 淘汰 + 剔出池
 
 
+# 预编译正则（中文/英文 ping 输出同形）
+_RE_LOSS = re.compile(r"(\d+(?:\.\d+)?)%\s*packet\s*loss")
+_RE_RTT = re.compile(r"=\s*[\d.]+/([\d.]+)/[\d.]+")
+
+
 def icmp_ping(ip: str, times: int = PING_TIMES, timeout: float = PING_TIMEOUT):
     """ICMP ping（系统 `ping` 命令）。返回 (avg_ms, loss)；不可达返回 (0, 1.0)。"""
+    # 注意：Linux iputils `ping -W` 的单位是**秒**（<1 会静默变 0），故强制 ≥1
+    wsec = max(1, int(timeout))
     try:
         out = subprocess.run(
-            ["ping", "-c", str(times), "-W", str(int(timeout)), ip],
+            ["ping", "-c", str(times), "-W", str(wsec), ip],
             capture_output=True, text=True, timeout=times * timeout + 10)
     except Exception:
         return 0, 1.0
-    m = re.search(r"(\d+(?:\.\d+)?)%\s*packet\s*loss", out.stdout or "")
+    m = _RE_LOSS.search(out.stdout or "")
     loss = 1.0
     if m:
         loss = float(m.group(1)) / 100.0
     # 平均时延："rtt min/avg/max/mdev = 12.1/14.3/16.9/1.2 ms"（中文/英文输出同形）
-    r = re.search(r"=\s*[\d.]+/([\d.]+)/[\d.]+", out.stdout or "")
+    r = _RE_RTT.search(out.stdout or "")
     avg_ms = float(r.group(1)) if r else 0.0
     if avg_ms > 0:
         avg_ms = max(1, round(avg_ms))  # 亚毫秒时延（回环）向上取整到 1ms
@@ -74,6 +80,8 @@ class Scanner:
         self.last_state = None
         self.result_payload = None
         self.start_ts = None
+        self._last_emit = 0.0   # set_progress 节流（monotonic）
+        self._last_pct = -100
         self.elapsed = 0
         self.done = threading.Event()
 
@@ -107,12 +115,19 @@ class Scanner:
         self._emit(self.last_state)
 
     def set_progress(self, stage, pct, detail=""):
+        # 节流：至少 200ms 间隔，或 pct 前进 ≥2 才推送，避免 ping 2000 IP 时 SSE 刷屏
+        pct = int(pct)
+        now = time.monotonic()
         with self._lock:
+            if now - self._last_emit < 0.2 and pct - self._last_pct < 2:
+                return
+            self._last_emit = now
+            self._last_pct = pct
             logs = self.last_state.get("logs", []) if self.last_state else []
         self._emit({
             "running": True,
             "stage": stage,
-            "pct": int(pct),
+            "pct": pct,
             "detail": detail,
             "elapsed": int(time.time() - self.start_ts) if self.start_ts else 0,
             "logs": logs,
@@ -347,18 +362,18 @@ class Scanner:
             self.log("所有 IP ping 失败（网络异常或被拦截）", "error")
             return []
 
-        # 丢包 ≥75%：淘汰 + 从所属 DC 池剔除
+        # 丢包 ≥75%：淘汰 + 从所属 DC 池剔除（locate 逐个定位所属 DC，按 DC 聚合一次 remove）
         bad_ips = [r["ip"] for r in ping_results if r["loss"] >= LOSS_CUTOFF]
         if bad_ips:
-            removed_any = False
-            for dc in pools.all_codes():
-                pool_ips = set(pools.get(dc))
-                bad_in_dc = [ip for ip in bad_ips if ip in pool_ips]
-                if bad_in_dc:
-                    pools.remove(dc, bad_in_dc)
-                    removed_any = True
-            if removed_any:
-                self.log(f"ping 丢包 ≥{LOSS_CUTOFF:.0%}：从池中剔除 {len(bad_ips)} 个失效 IP")
+            bad_by_dc: dict = {}
+            for ip in bad_ips:
+                dc = pools.locate(ip)
+                if dc:
+                    bad_by_dc.setdefault(dc, []).append(ip)
+            for dc, ip_list in bad_by_dc.items():
+                pools.remove(dc, ip_list)
+            if bad_by_dc:
+                self.log(f"ping 丢包 ≥{LOSS_CUTOFF:.0%}：从池中剔除 {sum(len(v) for v in bad_by_dc.values())} 个失效 IP")
         ping_results = [r for r in ping_results if r["loss"] < LOSS_CUTOFF]
 
         # 时延 > 2× 最佳时延 淘汰（零丢包者豁免）
@@ -432,10 +447,7 @@ class Scanner:
         try:
             t0 = time.perf_counter()
             sock = socket.create_connection((ip, 443), timeout=3)
-            ctx = ssl.create_default_context()
-            ctx.check_hostname = False
-            ctx.verify_mode = ssl.CERT_NONE
-            conn = ctx.wrap_socket(sock, server_hostname=host)
+            conn = ipdata._ssl_ctx().wrap_socket(sock, server_hostname=host)
             result["ping"] = result["latency"] = max(1, int((time.perf_counter() - t0) * 1000))
             conn.settimeout(speed_secs + 8)
 
@@ -469,6 +481,7 @@ class Scanner:
                     meta[k] = v
                 elif k in ("country", "city", "colo"):
                     meta[f"cf-meta-{k}"] = v
+            # 头部已读完，剩余 body 忽略（recv_into 会丢弃未读数据）
             loc_parts = []
             country_code = meta.get("cf-meta-country", "")
             city = meta.get("cf-meta-city", "")
@@ -478,23 +491,21 @@ class Scanner:
                 loc_parts.append(city)
             if loc_parts:
                 result["location"] = "·".join(loc_parts)
-            body = head.split(b"\r\n\r\n", 1)[1]
-
+            # head 中可能已带部分 body，丢弃；recv_into 循环只统计新接收字节
             peak_bps = 0.0
             win_bytes, win_start = 0, time.time()
             global_start = time.time()
+            buf = bytearray(65536)  # recv_into 复用 buffer，减少拷贝
             while time.time() - global_start < speed_secs:
                 if self._cancelled():
                     break
-                if not body:
-                    try:
-                        body = conn.recv(65536)
-                    except (socket.timeout, Exception):
-                        break
-                    if not body:
-                        break
-                win_bytes += len(body)
-                body = b""
+                try:
+                    n = conn.recv_into(buf)
+                except Exception:
+                    break
+                if not n:
+                    break
+                win_bytes += n
                 now = time.time()
                 if now - win_start >= 1.0:
                     bps = win_bytes * 8 / (now - win_start)
