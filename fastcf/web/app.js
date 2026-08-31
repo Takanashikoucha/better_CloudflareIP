@@ -206,12 +206,13 @@ function renderLogs(logs) {
 
 /* ═══ SSE ═══ */
 
-function initSSE() {
+function openSSE() {
+  if (sse) { sse.close(); sse = null; }
   sse = new EventSource("/api/stream");
   sse.onmessage = (ev) => {
     let d;
     try { d = JSON.parse(ev.data); } catch (e) { return; }
-    if (d.type === "none") return;
+    if (d.type === "none") { /* 无扫描：服务端已关闭，等待重连 */ return; }
     setRunning(!!d.running, d.stage);
     renderProgress(d);
     if (d.pool_ips != null) {
@@ -249,6 +250,13 @@ async function startScan() {
     });
     logN = 0;
     $("#logBox").innerHTML = "";
+    // 立即重建 SSE：旧的"无扫描"连接已关闭，新连接直接挂到本次扫描的流上
+    openSSE();
+    // 立即显示"扫描中"，不用等第一条 SSE
+    setRunning(true, "prepare");
+    $("#stageName").textContent = "准备";
+    $("#stagePct").textContent = "0%";
+    $("#stageFill").style.width = "0%";
     toast("扫描已开始", "ok");
   } catch (e) {
     toast(e.message, "err");
@@ -646,7 +654,7 @@ function init() {
   refreshDataStatus();
   refreshHistory();
   loadLatest();
-  initSSE();
+  openSSE();
   // 数据状态低频刷新（扫描进行中由 SSE 携带池统计，无需轮询）
   setInterval(() => {
     if (!$("#runInd").classList.contains("busy")) refreshDataStatus();
