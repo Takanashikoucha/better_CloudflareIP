@@ -113,6 +113,18 @@ def remove(code: str, ips: list):
             _save()
 
 
+def remove_ip(code: str, ip: str) -> bool:
+    """从指定 DC 的池中删除单个 IP，返回是否删除成功。"""
+    _ensure_loaded()
+    with _lock:
+        pool = _pool.get(code.upper())
+        if not pool or ip not in pool:
+            return False
+        pool.remove(ip)
+        _save()
+        return True
+
+
 def touch(code: str):
     """刷新某 DC 池的时间戳（事件性重验成功时调用）。"""
     _ensure_loaded()
@@ -145,6 +157,16 @@ def locate(ip: str) -> str:
         if ip in ips:
             return code
     return ""
+
+
+def build_ip_index() -> dict:
+    """构建 {ip: dc} 反向索引，供批量 locate 使用（O(1) 查找）。"""
+    _ensure_loaded()
+    idx = {}
+    for code, ips in (_pool or {}).items():
+        for ip in ips:
+            idx[ip] = code
+    return idx
 
 
 def pool_report() -> dict:

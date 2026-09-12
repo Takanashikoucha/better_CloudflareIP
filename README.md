@@ -1,11 +1,14 @@
-# FastCF — Cloudflare IP 优选测速（Linux · 零依赖 · 直连）
+# FastCF — Cloudflare IP 优选测速（Linux · 直连）
 
-> 基于 Python 3 标准库的 Cloudflare IP 优选工具：固定 **IPv4 · 443/TLS · 结果 5 个**，
+> **重构已完成（v4.0.0）**：继续本任务前，先读取 `docs/DESIGN.md`（设计文档）
+> 与 `docs/PROGRESS.md`（进度文档）。当前状态见进度文档"当前状态"一行。
+
+> 基于 Python 3 + FastAPI 的 Cloudflare IP 优选工具：固定 **IPv4 · 443/TLS · 结果 5 个**，
 > **指定 DC / 全局随机** 两种来源模式，**ICMP ping 预筛 + 串行下载测速**，
 > 本地历史、手动 IP 池管理、CSV/JSON 导出、SSE 实时日志。
 > 无后台扫描线程——IP 池完全靠手动添加与扫描副产品积累。
-> 所有测速流量**直连**（模块导入时自动清除 `http_proxy` / `https_proxy` / `all_proxy` 环境变量）。
-> UI 为现代深色玻璃拟态风格（含浅色主题切换）。
+> 所有测速流量**直连**（启动时自动清除 `http_proxy` / `https_proxy` / `all_proxy` 环境变量）。
+> UI 为浅色控制台风格（Linear 式安静高级：扁平面板 + 发丝边框 + 单一青色强调 + 等宽数据字体）。
 
 ## 特性
 
@@ -25,11 +28,13 @@
 - 🏆 **排名结果表** — ping 延迟 / 丢包率 / 峰值速度 / CF 数据中心中文名 / 归属地，按 **延迟 → 丢包 → 速度** 排序，支持按列排序
 - 📜 **本地历史** — 自动保存最近 50 次，支持查看 / 复用参数 / 删除 / 下载 CSV
 - 📤 **结果导出** — CSV（与 CFST result.csv 风格对齐）+ JSON
-- 🌗 **现代深色玻璃拟态 UI** — 深色（默认）/ 浅色双主题、双栏 Dashboard 布局、SSE 实时日志流、数据状态卡
+- 🎨 **浅色控制台 UI** — Linear 式安静高级风格（扁平面板 + 发丝边框 + 单一青色强调 + 等宽数据字体）、双栏 Dashboard 布局、SSE 实时日志流、数据状态卡
 
 ## 快速开始
 
-> 要求 Python 3.10+，零第三方依赖（无需 `pip install`）。需要系统 `ping` 命令（Linux 默认自带）。
+> 要求 Python 3.10+。依赖 `fastapi` + `uvicorn`（见 `requirements.txt`；
+> 系统 site-packages 只读时：`pip install --target .vendor fastapi uvicorn`，
+> 入口脚本会自动把 `.vendor` 加入 `sys.path`）。需要系统 `ping` 命令（Linux 默认自带）。
 
 ```bash
 python3 fastcf.py                 # 启动并自动打开浏览器
@@ -98,11 +103,9 @@ python3 fastcf.py --data-dir /x   # 指定数据缓存目录
 
 | 途径 | 说明 |
 |------|------|
-| 段首 IP 探测初始化 | 前端"IP 池管理"面板：对**每个官方 CF IPv4 段的首个 IP**（14 条段 → 约 14 个）并发拨号读 `cf-meta-colo`，按实际 DC 归池；可先强制刷新双源缓存（绕 7 天 TTL） |
 | 手动探测并添加 | 前端"IP 池管理"面板：已知来源校验（官方段 ∪ 外部 443 清单）→ 并发拨号读 `cf-meta-colo` → 按实际 DC 归池 |
 | 随机 IP 测速前探测 | 随机模式进入下载测速的 IP，先探测实际服务节点并入池 |
-| 测速成功回写 | 任一模
-式中测速 >0Mbps 的 IP 回写其实际 DC |
+| 测速成功回写 | 任一模式中测速 >0Mbps 的 IP 回写其实际 DC |
 
 池规则：每 DC 上限 **50** 个 IP（超出保留最新）；**7 天 TTL**——过期不删除、不后台重探，
 只在**该 DC 池被指定 DC 扫描用到时**触发事件性重验（前台同步，ping 全池，
@@ -111,26 +114,38 @@ python3 fastcf.py --data-dir /x   # 指定数据缓存目录
 ## 项目结构
 
 ```
-fastcf.py              # 入口脚本（代理清除 + web 服务启动 + 后台预热双源缓存）
+fastcf.py              # 入口脚本（代理清除 + .vendor 引导 + web 服务启动 + 后台预热双源缓存）
 fastcf/
   __init__.py          # 包初始化（版本号单一来源）
-  data_colos.py        # CF colo → 中文节点名参考表（Netrvin 快照，离线兜底）
+  config.py            # 常量 + ScanParams（Pydantic 参数校验）
+  net.py               # 直连下载（总时间预算）/ 原子写 / 重试
+  store.py             # 统一持久化（单锁 + 原子写 + 7 天缓存）
+  zhnames.py           # 静态中文映射（国家 149 / 城市 178，从 colos.py 拆出）
+  colos.py             # CF colo 参考表（静态快照 + 在线刷新 3 天 TTL + 国家分组）
+  sources.py           # 双源获取（官方 ips-v4 + 外部 443 清单）/ 缓存 / 合并采样 / 已知来源校验
+  pool.py              # DC 级 IP 池（管理 / 入池校验 / 事件性过期判定）
+  history.py           # 历史记录（基于 store）
+  scanner.py           # 测速引擎（EngineContext 依赖注入；ICMP ping 并发预筛 + 443/TLS 下载测速 + 回退编排）
+  appstate.py          # 进程级状态机（idle/running/done/error/cancelled；SSE 发布订阅）
+  server.py            # FastAPI 路由（静态 UI + JSON API + SSE 流）
   exports.py           # 结果导出（csv / json）
-  geoip.py             # colo 参考数据（静态快照 + 在线刷新）/ 中文国家映射
-  ipdata.py            # 双源获取（官方 ips-v4 + 外部 443 清单）/ 缓存 / 合并采样 / 位置探测 / 段首 IP 探测初始化
-  pools.py             # DC 级 IP 池（管理 / 入池校验 / locate 定位 / 事件性过期判定）
-  scanner.py           # 测速引擎（ICMP ping 并发预筛 + 443/TLS 下载测速 + 回退编排）
-  server.py            # HTTP 服务（内存静态 UI + JSON API + SSE 流）
   web/
     index.html         # UI 页面（双栏 Dashboard）
-    style.css          # 样式（深色玻璃拟态 / 浅色双主题）
-    app.js             # 前端逻辑（SSE、导出、历史、IP 池、数据状态、主题）
+    style.css          # 样式（浅色控制台 · Linear 式安静高级）
+    app.js             # 前端逻辑（SSE、导出、历史、IP 池、数据状态）
 tests/
-  test_units.py        # 离线单元测试（零依赖、不触网）
+  test_units.py        # 离线单元测试（21 个；mock EngineContext，不触网）
+docs/
+  DESIGN.md            # 重构设计文档（架构 / 状态机 / 持久化 / API / UI 方向）
+  PROGRESS.md          # 重构进度文档
 LICENSE                # MIT
-requirements.txt       # 依赖说明（零第三方依赖）
+requirements.txt       # 依赖说明（fastapi + uvicorn）
 README.md              # 本文档
 ```
+
+**依赖方向**（无环）：`config` ← `net` ← `store` ← `sources` / `pool` / `history` / `colos`；
+`scanner` 通过 `EngineContext` 注入 `sources` / `pool` / `colos` / `net`（可离线 mock）；
+`appstate` 持有 `scanner`；`server` 持有 `appstate`。
 
 ## 数据源
 
@@ -156,7 +171,7 @@ README.md              # 本文档
 | POST | `/api/scan` | 开始扫描（body 见下） |
 | POST | `/api/cancel` | 取消当前扫描（前端点「取消」时先弹确认框；取消后界面自动恢复可扫描，已测出的部分结果保留在日志中） |
 | POST | `/api/history` | 历史操作（`{action: "delete"|"clear", id}`） |
-| POST | `/api/pools` | 池操作（`{action: "add"|"init"|"clear"|"clear_all"}`；`add` 时 `code` 可省略，IP 按实际探测的 colo 归池，并先做已知来源校验（官方段 ∪ 外部 443 清单）；`init` 为段首 IP 探测初始化，`refresh_cache: true` 时先强制刷新双源缓存） |
+| POST | `/api/pools` | 池操作（`{action: "add"|"clear"|"clear_all"|"remove_ip"}`；`add` 时 `code` 可省略，IP 按实际探测的 colo 归池，并先做已知来源校验（官方段 ∪ 外部 443 清单）；`remove_ip` 删除指定 DC 的单个 IP） |
 
 ### 扫描参数（POST /api/scan body）
 
@@ -198,7 +213,8 @@ README.md              # 本文档
 
 ## 开发
 
-- 测试：`python3 tests/test_units.py`（离线单元测试，无需网络；用 `FASTCF_HOME` 临时目录隔离数据）
+- 测试：`python3 tests/test_units.py`（离线单元测试，21 个；用 `FASTCF_HOME` 临时目录隔离数据，
+  `EngineContext` mock 不触网）
 - 实现约定：CIDR 切分（`v4_prefixes`）一律走 `ipaddress` 标准库的字符串 API
   （`ip_network(str, strict=False)`、`.subnets(new_prefix=)`、`.hosts()`），
   **不做手写的整数位运算**（`<<`、`>>`、`&`、`~`）。部分 Python 构建下大整数位运算结果不可靠，
@@ -207,6 +223,8 @@ README.md              # 本文档
 - 版本号单一来源：`fastcf/__init__.py` 的 `__version__`
 - 前端：原生 HTML/CSS/JS，零构建零 CDN；UI 改动后无需重新编译（服务端启动时读入内存，
   改 UI 文件需重启服务生效）
+- 状态管理：`AppState` 为唯一进程级状态源；`store.py` 统一持久化（原子写 + 单锁）；
+  前端只保留表单草稿状态，运行态/结果/历史/池全部来自后端
 
 ## 许可证
 

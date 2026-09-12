@@ -258,7 +258,11 @@ def _download(url, dest: Path, timeout=60, min_size=1000):
     tmp = dest.with_suffix(dest.suffix + ".part")
     try:
         with opener.open(req, timeout=timeout) as r:
-            r.fp.raw._sock.settimeout(timeout)  # socket 读超时
+            # 尝试设置 socket 读超时（私有 API，版本升级可能失效，失败时仅依赖连接超时）
+            try:
+                r.fp.raw._sock.settimeout(timeout)
+            except (AttributeError, OSError):
+                pass
             with open(tmp, "wb") as f:
                 while True:
                     chunk = r.read(1 << 16)

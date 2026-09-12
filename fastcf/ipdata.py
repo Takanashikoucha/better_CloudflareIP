@@ -27,6 +27,10 @@ CF_IPS_URL = "https://www.cloudflare.com/ips-v4"     # 官方段（CIDR）
 EXT_IPS_URL = "https://zip.cm.edu.kg/all.txt"        # 外部 IP 清单（IP:PORT#CC）
 CACHE_TTL = 7 * 86400  # 两源缓存均为 7 天
 
+# 下载锁：防止并发下载同一 URL（启动预热 + 用户立即扫描时）
+import threading
+_fetch_lock = threading.Lock()
+
 
 def _direct_download(url, timeout=30, retries=3):
     """绕过代理直连下载（socket 级超时，防止慢速连接挂死）。
@@ -120,14 +124,23 @@ def fetch_cf_ips(force=False) -> dict:
                 return cached
         except Exception:
             pass
-    try:
-        v4 = _parse_cidr_lines(_direct_download(CF_IPS_URL))
-        if v4:
-            out = {"ts": time.time(), "v4": v4, "source": CF_IPS_URL}
-            _atomic_write(CF_IPS_CACHE, out)
-            return out
-    except Exception:
-        pass
+    with _fetch_lock:
+        # 双重检查：等锁期间可能已被其他线程下载完成
+        if not force and CF_IPS_CACHE.exists():
+            try:
+                cached = json.loads(CF_IPS_CACHE.read_text())
+                if time.time() - cached.get("ts", 0) < CACHE_TTL and cached.get("v4"):
+                    return cached
+            except Exception:
+                pass
+        try:
+            v4 = _parse_cidr_lines(_direct_download(CF_IPS_URL))
+            if v4:
+                out = {"ts": time.time(), "v4": v4, "source": CF_IPS_URL}
+                _atomic_write(CF_IPS_CACHE, out)
+                return out
+        except Exception:
+            pass
     # 下载失败：沿用旧缓存（哪怕过期），彻底没有才抛异常
     if CF_IPS_CACHE.exists():
         try:
@@ -152,15 +165,24 @@ def fetch_external_ips(force=False) -> dict:
                 return cached
         except Exception:
             pass
-    try:
-        ips, kept, skipped = parse_ext_lines(_direct_download(EXT_IPS_URL))
-        if ips:
-            out = {"ts": time.time(), "v4": ips, "source": EXT_IPS_URL,
-                   "kept": kept, "skipped": skipped}
-            _atomic_write(EXT_IPS_CACHE, out)
-            return out
-    except Exception:
-        pass
+    with _fetch_lock:
+        # 双重检查：等锁期间可能已被其他线程下载完成
+        if not force and EXT_IPS_CACHE.exists():
+            try:
+                cached = json.loads(EXT_IPS_CACHE.read_text())
+                if time.time() - cached.get("ts", 0) < CACHE_TTL and cached.get("v4"):
+                    return cached
+            except Exception:
+                pass
+        try:
+            ips, kept, skipped = parse_ext_lines(_direct_download(EXT_IPS_URL))
+            if ips:
+                out = {"ts": time.time(), "v4": ips, "source": EXT_IPS_URL,
+                       "kept": kept, "skipped": skipped}
+                _atomic_write(EXT_IPS_CACHE, out)
+                return out
+        except Exception:
+            pass
     if EXT_IPS_CACHE.exists():
         try:
             cached = json.loads(EXT_IPS_CACHE.read_text())
@@ -314,10 +336,13 @@ def _expand_sample(cidrs, target: int):
         return []
 
     ips = []
-    while len(ips) < target * 3:  # 多采一点供上游去重，上限 target*3
+    cap = target * 3  # 多采一点供上游去重，上限 target*3
+    while len(ips) < cap:
         random.shuffle(blocks)
         progressed = False
         for net in blocks:
+            if len(ips) >= cap:
+                break
             hosts = list(net.hosts())
             if not hosts:
                 continue
@@ -327,7 +352,7 @@ def _expand_sample(cidrs, target: int):
                 if s not in ips:
                     ips.append(s)
                     progressed = True
-                    if len(ips) >= target * 3:
+                    if len(ips) >= cap:
                         break
         if not progressed:
             break
@@ -414,12 +439,7 @@ def probe_location(ip: str, use_tls=True, timeout=4):
             head += chunk
         if b"\r\n\r\n" not in head:
             return (None, None, None)
-        meta = {}
-        for line in head.split(b"\r\n\r\n", 1)[0].decode("latin-1", "ignore").split("\r\n"):
-            if ":" not in line:
-                continue
-            k, v = line.split(":", 1)
-            meta[k.strip().lower()] = v.strip()
+        meta = parse_cf_headers(head)
         cc = (meta.get("cf-meta-country") or meta.get("country") or "").upper()
         colo = meta.get("cf-meta-colo") or meta.get("colo") or ""
         city = meta.get("cf-meta-city") or meta.get("city") or ""
@@ -434,6 +454,21 @@ def probe_location(ip: str, use_tls=True, timeout=4):
                 conn.close()
             except Exception:
                 pass
+
+
+def parse_cf_headers(head_bytes: bytes) -> dict:
+    """解析 CF 响应头，返回 {lowercase_key: value}。
+
+    供 probe_location 和 scanner._speed_test 复用，消除重复代码。
+    """
+    meta = {}
+    head_str = head_bytes.split(b"\r\n\r\n", 1)[0].decode("latin-1", "ignore")
+    for line in head_str.split("\r\n"):
+        if ":" not in line:
+            continue
+        k, v = line.split(":", 1)
+        meta[k.strip().lower()] = v.strip()
+    return meta
 
 
 _SSL_CTX = None

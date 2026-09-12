@@ -1,94 +1,24 @@
 # -*- coding: utf-8 -*-
-"""HTTP 服务：静态 Web UI + JSON API + SSE 实时日志流。"""
+"""FastAPI 服务：静态 Web UI + JSON API + SSE 实时日志流。"""
 import json
-import os
-import sys
 import threading
-import time
-from datetime import datetime
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from . import __version__, exports, geoip, ipdata, pools
-from .scanner import Scanner
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse, Response, StreamingResponse
+
+from . import __version__, colos, exports, history, pool
+from .appstate import AppState
+from .config import ScanParams
 
 WEB_DIR = Path(__file__).parent / "web"
-HISTORY_FILE = Path(os.environ.get("FASTCF_HOME", str(Path.home() / ".fastcf"))) / "history.json"
+
+app = FastAPI(title="FastCF", version=__version__)
+state = AppState()  # 进程级单例：所有端点共享同一状态源
 
 
-# ── 历史 ──
+# ── 静态资源（启动时读入内存，内容小；版本号单一来源替换）──
 
-def load_history() -> list:
-    try:
-        return json.loads(HISTORY_FILE.read_text())
-    except Exception:
-        return []
-
-
-def save_history(h: list):
-    HISTORY_FILE.parent.mkdir(parents=True, exist_ok=True)
-    HISTORY_FILE.write_text(json.dumps(h, ensure_ascii=False, indent=2))
-
-
-def add_history(payload: dict, params: dict):
-    h = load_history()
-    entry = {
-        "id": int(time.time() * 1000),
-        "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        **payload,
-        "params": params,
-    }
-    h.insert(0, entry)
-    save_history(h[:50])
-
-
-# ── 扫描管理 ──
-
-class ScanManager:
-    def __init__(self):
-        self.scanner: Scanner | None = None
-        self.lock = threading.Lock()
-        self.last_result: dict | None = None
-        self.last_params: dict | None = None
-
-    def start(self, params: dict):
-        with self.lock:
-            if self.scanner and self.scanner.last_state and self.scanner.last_state.get("running"):
-                return False, "扫描正在进行中"
-            self.scanner = Scanner(params)
-            self.last_result = None
-        t = threading.Thread(target=self._run, args=(self.scanner, params), daemon=True)
-        t.start()
-        return True, ""
-
-    def _run(self, sc: Scanner, params: dict):
-        try:
-            sc.run()
-        except Exception as e:
-            sc._finish_error(f"扫描异常：{e}")
-        if sc.result_payload and "error" not in sc.result_payload:
-            with self.lock:
-                self.last_result = sc.result_payload
-                self.last_params = params
-            add_history(sc.result_payload, params)
-
-    def cancel(self):
-        with self.lock:
-            if self.scanner:
-                self.scanner.cancel()
-
-    @property
-    def running(self):
-        # 以 done 事件为准（消除对 last_state 首次 emit 时序的依赖）：
-        # 扫描器存在且尚未结束 = 运行中
-        with self.lock:
-            return bool(self.scanner and not self.scanner.done.is_set())
-
-
-manager = ScanManager()
-
-
-# 静态资源启动时读入内存（内容小），避免每请求读盘；版本号单一来源替换在启动时完成
 _STATIC: dict = {}
 
 
@@ -99,247 +29,190 @@ def _load_static():
     _STATIC["/style.css"] = (WEB_DIR / "style.css").read_text(encoding="utf-8")
 
 
-class FastCFHandler(BaseHTTPRequestHandler):
-    server_version = f"FastCF/{__version__}"
-    protocol_version = "HTTP/1.1"
+@app.on_event("startup")
+def _startup():
+    _load_static()
+    # 后台预热：colo 参考数据 + 双源 IP 缓存（均带 TTL，失败沿用旧缓存/快照）
+    from . import sources
+    threading.Thread(target=colos.colos.refresh, daemon=True).start()
+    threading.Thread(target=sources.fetch_cf_ips, daemon=True).start()
+    threading.Thread(target=sources.fetch_external_ips, daemon=True).start()
 
-    def log_message(self, fmt, *args):
-        pass
 
-    # ── 工具 ──
+# ── 静态页面 ──
 
-    def _send(self, body: bytes, ctype: str, code=200):
-        self.send_response(code)
-        self.send_header("Content-Type", ctype)
-        self.send_header("Content-Length", str(len(body)))
-        self.send_header("Cache-Control", "no-store")
-        self.end_headers()
-        try:
-            self.wfile.write(body)
-        except (BrokenPipeError, ConnectionResetError):
-            pass
+@app.get("/")
+def index():
+    return Response(_STATIC["/"], media_type="text/html; charset=utf-8")
 
-    def _json(self, obj, code=200):
-        self._send(json.dumps(obj, ensure_ascii=False).encode(), "application/json; charset=utf-8", code)
 
-    def _body_json(self) -> dict:
-        ln = int(self.headers.get("Content-Length") or 0)
-        if ln > 1_000_000:  # 防异常大 body
-            return {}
-        raw = self.rfile.read(ln) if ln else b"{}"
-        try:
-            return json.loads(raw.decode() or "{}")
-        except Exception:
-            return {}
+@app.get("/app.js")
+def app_js():
+    return Response(_STATIC["/app.js"], media_type="application/javascript; charset=utf-8")
 
-    # ── GET ──
 
-    def do_GET(self):
-        path = self.path.split("?")[0]
-        if path in ("/", "/index.html"):
-            self._send(_STATIC["/"].encode(), "text/html; charset=utf-8")
-        elif path in ("/app.js", "/style.css"):
-            ctype = "text/javascript" if path.endswith(".js") else "text/css"
-            self._send(_STATIC[path].encode(), f"{ctype}; charset=utf-8")
-        elif path == "/api/status":
-            with manager.lock:
-                sc = manager.scanner
-                result = manager.last_result
-            out = {}
-            if sc is not None and sc.result_payload and "error" in sc.result_payload:
-                out["error"] = sc.result_payload["error"]
-            if result:
-                out["result"] = result
-                out["params"] = manager.last_params
-            out["running"] = manager.running
-            self._json(out)
-        elif path == "/api/history":
-            self._json(load_history())
-        elif path == "/api/stream":
-            self._sse()
-        elif path == "/api/colos":
-            # 国家分组（中国系置顶）+ 各节点池大小，供前端下拉框
-            report = pools.pool_report()
-            groups = []
-            for g in geoip.colo_list_by_cc():
-                groups.append({
-                    "cc": g["cc"],
-                    "cc_zh": g["cc_zh"],
-                    "count": len(g["items"]),
-                    "pool": sum(report.get(i["code"], 0) for i in g["items"]),
-                    "items": [{**i, "pool": report.get(i["code"], 0)} for i in g["items"]],
-                })
-            self._json(groups)
-        elif path == "/api/export":
-            # ?fmt=csv|json&source=latest|history&history_id=N
-            qs = self.path.split("?", 1)[1] if "?" in self.path else ""
-            params = dict(p.split("=", 1) for p in qs.split("&") if "=" in p)
-            from urllib.parse import unquote
-            params = {k: unquote(v) for k, v in params.items()}
-            fmt = params.get("fmt", "csv")
-            if fmt not in exports.FORMATS:
-                self._json({"error": f"未知导出格式：{fmt}"}, 400)
-                return
-            source = params.get("source", "latest")
-            result = None
-            if source == "history":
-                for e in load_history():
-                    if str(e.get("id")) == params.get("history_id"):
-                        result = e
-                        break
-            elif source == "latest":
-                with manager.lock:
-                    result = manager.last_result
-            if not result or not result.get("results"):
-                self._json({"error": "没有可导出的结果"}, 404)
-                return
-            inline = (self.headers.get("X-Inline") == "1")
-            try:
-                data = exports.export(result, fmt)
-            except ValueError as e:
-                self._json({"error": str(e)}, 400)
-                return
-            body = data["content"].encode("utf-8")
-            self.send_response(200)
-            self.send_header("Content-Type", f"{data['ctype']}; charset=utf-8")
-            self.send_header("Content-Disposition",
-                             ("inline" if inline else "attachment") +
-                             f'; filename="{data["filename"]}"')
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
-        elif path == "/api/pools":
-            self._json(pools.pools_detail())
-        elif path == "/api/data-status":
-            # 数据目录 / 双源缓存 / 池统计 概要，供前端信息栏
-            d = geoip.DATA_DIR
-            rep = pools.pool_report()
-            src = ipdata.sources_status()
-            st = {
-                "version": __version__,
-                "data_dir": str(d),
-                "cf_cidrs": src["official"]["n"],
-                "cf_ts": src["official"]["ts"],
-                "cf_source": src["official"]["source"],
-                "ext_ips": src["external"]["n"],
-                "ext_ts": src["external"]["ts"],
-                "ext_source": src["external"]["source"],
-                "pool_dc": len(rep),
-                "pool_ips": sum(rep.values()),
-                "pool_expired": pools.expired(),
-                "colo_count": geoip.colo_count(),
-                "running": manager.running,
-                "python": ".".join(str(x) for x in sys.version_info[:3]),
-            }
-            self._json(st)
-        else:
-            self._json({"error": "not found"}, 404)
+@app.get("/style.css")
+def style_css():
+    return Response(_STATIC["/style.css"], media_type="text/css; charset=utf-8")
 
-    # ── POST ──
 
-    def do_POST(self):
-        path = self.path.split("?")[0]
-        body = self._body_json()
-        if path == "/api/scan":
-            ok, err = manager.start(body)
-            self._json({"error": err} if not ok else {"started": True})
-        elif path == "/api/cancel":
-            manager.cancel()
-            self._json({"cancelled": True})
-        elif path == "/api/history":
-            act = body.get("action")
-            if act == "delete":
-                h = [x for x in load_history() if x.get("id") != body.get("id")]
-                save_history(h)
-                self._json({"ok": True})
-            elif act == "clear":
-                save_history([])
-                self._json({"ok": True})
-            else:
-                self._json({"error": "bad action"}, 400)
-        elif path == "/api/pools":
-            act = body.get("action")
-            if act == "clear":
-                n = pools.clear_pool(body.get("code", ""))
-                self._json({"ok": True, "removed": n})
-            elif act == "clear_all":
-                n = pools.clear_all()
-                self._json({"ok": True, "removed": n})
-            elif act == "add":
-                # 手动补充 IP 入池：
-                #   1) 校验 IP 是否在 CF IPv4 段内（TYOYO1/CF-ASN 全量段；不在 → 拒绝）
-                #   2) 并发拨号读 cf-meta-colo 得到实际服务节点
-                #   3) 按实际 colo 归池（或匹配 body 指定的 code）
-                code = (body.get("code") or "").strip().upper()
-                ips = [x.strip() for x in str(body.get("ips", "")).replace(",", "\n").splitlines() if x.strip()]
-                if not ips:
-                    self._json({"error": "缺少 ips"}, 400)
-                    return
-                res = pools.probe_and_add(ips, code, use_tls=True, workers=12)
-                self._json({"ok": True, **res})
-            elif act == "init":
-                # 池初始化：对每个 CF IPv4 段的首个 IP 并发探测 cf-meta-colo 并入池。
-                # refresh_cache=true 时先强制刷新段缓存（绕 7 天 TTL，主源 TYOYO1/CF-ASN
-                # 失败自动回退官方 ips-v4）；段缓存过旧（如仍为官方 14 条大段）时建议勾选。
-                if body.get("refresh_cache"):
-                    try:
-                        ipdata.fetch_cf_ips(force=True)
-                    except Exception as e:
-                        self._json({"error": f"CF 段缓存刷新失败：{e}"}, 502)
-                        return
-                try:
-                    res = ipdata.segment_first_ips_probe(workers=20)
-                except Exception as e:
-                    self._json({"error": f"段首 IP 探测失败：{e}"}, 502)
-                    return
-                self._json({"ok": True, **res})
-            else:
-                self._json({"error": "bad action"}, 400)
-        else:
-            self._json({"error": "not found"}, 404)
+# ── 状态 / 历史 / 数据源 ──
 
-    # ── SSE ──
+@app.get("/api/status")
+def api_status():
+    return state.status()
 
-    def _sse(self):
-        with manager.lock:
-            sc = manager.scanner
-        # 竞态：扫描已结束（done）→ 直接下发最终态并关闭，避免空等 ping
-        if sc is not None and sc.done.is_set():
-            self.send_response(200)
-            self.send_header("Content-Type", "text/event-stream")
-            self.send_header("Cache-Control", "no-store")
-            self.send_header("Connection", "close")
-            self.end_headers()
+
+@app.get("/api/history")
+def api_history():
+    return history.load()
+
+
+@app.post("/api/history")
+async def api_history_op(request: Request):
+    body = await request.json()
+    act = body.get("action")
+    if act == "delete":
+        return {"ok": history.delete(body.get("id"))}
+    if act == "clear":
+        history.clear()
+        return {"ok": True}
+    return JSONResponse({"error": "bad action"}, status_code=400)
+
+
+@app.get("/api/colos")
+def api_colos():
+    # 国家分组（中国系置顶）+ 各节点池大小，供前端下拉框
+    report = pool.pool_report()
+    groups = []
+    for g in colos.colos.groups():
+        groups.append({
+            "cc": g["cc"],
+            "cc_zh": g["cc_zh"],
+            "count": len(g["items"]),
+            "pool": sum(report.get(i["code"], 0) for i in g["items"]),
+            "items": [{**i, "pool": report.get(i["code"], 0)} for i in g["items"]],
+        })
+    return groups
+
+
+@app.get("/api/pools")
+def api_pools():
+    return pool.pools_detail()
+
+
+@app.post("/api/pools")
+async def api_pools_op(request: Request):
+    body = await request.json()
+    act = body.get("action")
+    if act == "clear":
+        return {"ok": True, "removed": pool.clear_pool(body.get("code", ""))}
+    if act == "clear_all":
+        return {"ok": True, "removed": pool.clear_all()}
+    if act == "remove_ip":
+        code = (body.get("code") or "").strip().upper()
+        ip = (body.get("ip") or "").strip()
+        if not code or not ip:
+            return JSONResponse({"error": "缺少 code 或 ip"}, status_code=400)
+        ok = pool.remove_ip(code, ip)
+        return {"ok": ok, "removed": ok}
+    if act == "add":
+        # 手动补充 IP 入池：已知来源校验 + 并发拨号读 cf-meta-colo 按实际节点归池
+        code = (body.get("code") or "").strip().upper()
+        ips = [x.strip() for x in str(body.get("ips", "")).replace(",", "\n").splitlines() if x.strip()]
+        if not ips:
+            return JSONResponse({"error": "缺少 ips"}, status_code=400)
+        res = pool.probe_and_add(ips, code, workers=12)
+        return {"ok": True, **res}
+    return JSONResponse({"error": "bad action"}, status_code=400)
+
+
+@app.get("/api/data-status")
+def api_data_status():
+    return state.data_status()
+
+
+# ── 扫描（入口参数校验：非法参数 422，不启动扫描线程）──
+
+@app.post("/api/scan")
+async def api_scan(request: Request):
+    body = await request.json()
+    try:
+        params = ScanParams(**body)
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=422)
+    err = params.validate()
+    if err:
+        return JSONResponse({"error": err}, status_code=422)
+    ok, err = state.start(params.model_dump())
+    return JSONResponse({"error": err}, status_code=409) if not ok else {"started": True}
+
+
+@app.post("/api/cancel")
+def api_cancel():
+    state.cancel()
+    return {"cancelled": True}
+
+
+# ── 导出 ──
+
+@app.get("/api/export")
+def api_export(fmt: str = "csv", source: str = "latest", history_id: int | None = None,
+               x_inline: str = "0"):
+    if fmt not in exports.FORMATS:
+        return JSONResponse({"error": f"未知导出格式：{fmt}"}, status_code=400)
+    result = None
+    if source == "history" and history_id is not None:
+        for e in history.load():
+            if e.get("id") == history_id:
+                result = e
+                break
+    elif source == "latest":
+        result = state.last_result
+    if not result or not result.get("results"):
+        return JSONResponse({"error": "没有可导出的结果"}, status_code=404)
+    try:
+        data = exports.export(result, fmt)
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+    return Response(
+        content=data["content"].encode("utf-8"),
+        media_type=f"{data['ctype']}; charset=utf-8",
+        headers={"Content-Disposition":
+                 ("inline" if x_inline == "1" else "attachment")
+                 + f'; filename="{data["filename"]}"'},
+    )
+
+
+# ── SSE 实时日志流 ──
+
+@app.get("/api/stream")
+def api_stream():
+    sc = state.scanner
+    # 竞态：扫描已结束（done）→ 直接下发最终态并关闭，避免空等
+    if sc is not None and sc.done.is_set():
+        async def gen():
             final = sc.last_state or {"running": False, "stage": "done", "pct": 100}
-            self.wfile.write(b"data: " + json.dumps(final, ensure_ascii=False).encode() + b"\n\n")
-            self.wfile.flush()
-            return
+            yield b"data: " + json.dumps(final, ensure_ascii=False).encode() + b"\n\n"
+        return StreamingResponse(gen(), media_type="text/event-stream",
+                                headers={"Cache-Control": "no-store", "Connection": "close"})
 
-        self.send_response(200)
-        self.send_header("Content-Type", "text/event-stream")
-        self.send_header("Cache-Control", "no-store")
-        self.send_header("Connection", "keep-alive")
-        self.send_header("X-Accel-Buffering", "no")
-        self.end_headers()
-
+    async def gen():
         if sc is None:
-            self.wfile.write(b'data: {"type":"none"}\n\n')
-            self.wfile.flush()
+            yield b'data: {"type":"none"}\n\n'
             return
-
         q = sc.subscribe()
         try:
             while True:
                 try:
                     item = q.get(timeout=15)
                 except Exception:
-                    self.wfile.write(b": ping\n\n")
-                    self.wfile.flush()
+                    yield b": ping\n\n"
                     continue
                 if item is None:
                     break
-                rep = pools.pool_report()
-                state = {
+                rep = pool.pool_report()
+                s = {
                     "type": "state",
                     "running": item.get("running"),
                     "stage": item.get("stage"),
@@ -347,49 +220,16 @@ class FastCFHandler(BaseHTTPRequestHandler):
                     "detail": item.get("detail"),
                     "elapsed": item.get("elapsed"),
                     "logs": item.get("logs", []),
-                    # 池统计随状态流实时下发（否则前端 30s 定时刷新会让池数"卡住"，
-                    # 后台填充入池时界面上看不出来）
+                    # 池统计随状态流实时下发（否则前端定时刷新会让池数"卡住"）
                     "pool_dc": len(rep),
                     "pool_ips": sum(rep.values()),
                 }
-                self.wfile.write(b"data: " + json.dumps(state, ensure_ascii=False).encode() + b"\n\n")
-                self.wfile.flush()
+                yield b"data: " + json.dumps(s, ensure_ascii=False).encode() + b"\n\n"
                 if item.get("stage") in ("done", "error") and not item.get("running"):
                     break
-        except (BrokenPipeError, ConnectionResetError, OSError):
-            pass
         finally:
             sc.unsubscribe(q)
 
-
-# ── 启动 ──
-
-def find_free_port(preferred: int | None = None, host: str = "127.0.0.1") -> int:
-    """分配监听端口：preferred 非 0 且可用则用之，否则自动选空闲端口。
-    探测时绑定真实监听地址（0.0.0.0 的可用性可能不同于 127.0.0.1）。"""
-    import socket
-    if preferred:
-        try:
-            with socket.socket() as s:
-                s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-                s.bind((host, preferred))
-                return preferred
-        except OSError:
-            pass
-    with socket.socket() as s:
-        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        s.bind((host, 0))
-        return s.getsockname()[1]
-
-
-def run_server(host: str, port: int) -> ThreadingHTTPServer:
-    server = ThreadingHTTPServer((host, port), FastCFHandler)
-    server.daemon_threads = True
-    return server
-
-
-def start(host: str, port: int = 0) -> tuple[ThreadingHTTPServer, int]:
-    """启动监听并返回 (server, 实际端口)。port=0 自动分配；监听失败抛 OSError。"""
-    _load_static()
-    port = find_free_port(port or None, host=host)
-    return run_server(host, port), port
+    return StreamingResponse(gen(), media_type="text/event-stream",
+                            headers={"Cache-Control": "no-store",
+                                   "X-Accel-Buffering": "no"})

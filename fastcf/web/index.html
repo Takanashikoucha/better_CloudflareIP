@@ -4,15 +4,15 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>FastCF · Cloudflare IP 优选</title>
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' y1='0' x2='1' y2='1'%3E%3Cstop offset='0' stop-color='%2338bdf8'/%3E%3Cstop offset='1' stop-color='%23818cf8'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='32' height='32' rx='8' fill='url(%23g)'/%3E%3Ctext x='16' y='21' font-size='13' font-family='monospace' font-weight='bold' fill='%23fff' text-anchor='middle'%3Ecf%3C/text%3E%3C/svg%3E">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' y1='0' x2='1' y2='1'%3E%3Cstop offset='0' stop-color='%2322d3ee'/%3E%3Cstop offset='1' stop-color='%230e7490'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='32' height='32' rx='8' fill='url(%23g)'/%3E%3Ctext x='16' y='21' font-size='13' font-family='monospace' font-weight='bold' fill='%2304141a' text-anchor='middle'%3Ecf%3C/text%3E%3C/svg%3E">
 <link rel="stylesheet" href="/style.css">
 </head>
-<body data-theme="dark">
-<div class="bg-glow" aria-hidden="true"></div>
+<body>
+<div class="bg-grid" aria-hidden="true"></div>
 
 <div class="wrap">
   <!-- ══ Header ══ -->
-  <header class="appbar glass">
+  <header class="appbar">
     <div class="brand">
       <div class="logo">cf</div>
       <div class="brand-txt">
@@ -24,9 +24,6 @@
       <div class="run-ind" id="runInd" title="当前状态">
         <span class="run-dot" id="runDot"></span><span id="runTxt">空闲</span>
       </div>
-      <button class="icon-btn" id="btnTheme" title="切换主题" aria-label="切换主题">
-        <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path class="ic-moon" d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>
-      </button>
       <button class="icon-btn" id="btnPools" title="IP 池管理" aria-label="IP 池管理">
         <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14c0 1.7 4 3 9 3s9-1.3 9-3V5"/><path d="M3 12c0 1.7 4 3 9 3s9-1.3 9-3"/></svg>
       </button>
@@ -36,10 +33,34 @@
     </div>
   </header>
 
+  <!-- ══ 数据状态条（KPI 卡）══ -->
+  <div class="kpis">
+    <div class="kpi">
+      <span class="kpi-label">官方 CF 段</span>
+      <b class="kpi-val mono" id="stCidr">—</b>
+      <small class="kpi-sub" id="stCidrSub">cloudflare.com/ips-v4</small>
+    </div>
+    <div class="kpi">
+      <span class="kpi-label">外部清单（443）</span>
+      <b class="kpi-val mono" id="stExt">—</b>
+      <small class="kpi-sub" id="stExtSub">zip.cm.edu.kg/all.txt</small>
+    </div>
+    <div class="kpi">
+      <span class="kpi-label">IP 池</span>
+      <b class="kpi-val mono" id="stPool">—</b>
+      <small class="kpi-sub" id="stPoolSub">节点 / IP 数</small>
+    </div>
+    <div class="kpi">
+      <span class="kpi-label">已知节点</span>
+      <b class="kpi-val mono" id="stColo">—</b>
+      <small class="kpi-sub" id="stVer"></small>
+    </div>
+  </div>
+
   <div class="layout">
-    <!-- ══ 左栏：设置 + 数据状态 ══ -->
+    <!-- ══ 左栏：扫描设置 ══ -->
     <aside class="col-left">
-      <section class="card glass fade-up">
+      <section class="card">
         <h3 class="card-title"><span class="tick"></span>扫描设置</h3>
 
         <!-- 模式分段控件 -->
@@ -92,30 +113,16 @@
           取消扫描
         </button>
       </section>
-
-      <section class="card glass fade-up d2">
-        <h3 class="card-title"><span class="tick"></span>数据状态</h3>
-        <div class="kv-grid">
-          <div class="kv"><span>官方段</span><b id="stCidr">—</b></div>
-          <div class="kv"><span>外部清单</span><b id="stExt">—</b></div>
-          <div class="kv"><span>IP 池</span><b id="stPool">—</b></div>
-          <div class="kv"><span>已知节点</span><b id="stColo">—</b></div>
-        </div>
-        <div class="kv-sub">
-          <span id="stDir" title="数据目录"></span>
-          <span id="stVer"></span>
-        </div>
-      </section>
     </aside>
 
     <!-- ══ 右栏：进度 / 结果 / 历史 ══ -->
     <main class="col-right">
-      <section class="card glass fade-up d1 progress-card" id="progressCard">
+      <section class="card progress-card" id="progressCard">
         <div class="progress-top">
           <h3 class="card-title"><span class="tick"></span>扫描进度</h3>
           <div class="prog-meta">
             <span id="stageName">准备中…</span>
-            <b id="stagePct">0%</b>
+            <b id="stagePct" class="mono">0%</b>
           </div>
         </div>
         <div class="stagebar"><div class="fill" id="stageFill"></div></div>
@@ -180,7 +187,7 @@
 
 <!-- ══ IP 池管理弹窗 ══ -->
 <div class="modal-mask" id="poolsModal" hidden>
-  <div class="modal glass" role="dialog" aria-modal="true" aria-label="IP 池管理">
+  <div class="modal" role="dialog" aria-modal="true" aria-label="IP 池管理">
     <div class="modal-head">
       <h3>IP 池管理</h3>
       <button class="icon-btn" id="btnClosePools" aria-label="关闭">✕</button>
@@ -188,7 +195,7 @@
     <div class="modal-body">
       <p class="hint">
         每个节点（DC）缓存已验证可直连的 IPv4（上限 50/节点 · 7 天有效期 · 过期后指定节点扫描时事件性重验）。
-        入池途径：官方段首 IP 探测初始化 / 手动探测添加 / 随机 IP 测速前探测 / 测速成功回写。
+        入池途径：手动探测添加 / 随机 IP 测速前探测 / 测速成功回写。
         入池校验：IP 必须属于<b>官方 CF 段</b>或<b>外部 443 清单</b>，再拨号读 <code>cf-meta-colo</code> 按实际节点归池。
       </p>
       <div class="row">
@@ -207,14 +214,8 @@
       </div>
       <pre id="poolProbeResult" class="probe-res mono" hidden></pre>
       <div class="row spread">
-        <div class="row" style="gap:10px;flex-wrap:wrap">
-          <button class="btn-ghost" id="btnPoolInit">段首 IP 探测初始化</button>
-          <label class="hint check"><input type="checkbox" id="chkRefreshCache" style="margin:0"> 先刷新段 / 清单缓存</label>
-        </div>
-        <div class="row" style="gap:10px;align-items:center">
-          <span class="hint" id="poolStats"></span>
-          <button class="btn-ghost danger" id="btnPoolClearAll">清空全部池</button>
-        </div>
+        <span class="hint" id="poolStats"></span>
+        <button class="btn-ghost danger" id="btnPoolClearAll">清空全部池</button>
       </div>
       <div class="pool-list" id="poolList"></div>
     </div>
@@ -223,7 +224,7 @@
 
 <!-- ══ 系统信息弹窗 ══ -->
 <div class="modal-mask" id="infoModal" hidden>
-  <div class="modal glass narrow" role="dialog" aria-modal="true" aria-label="系统信息">
+  <div class="modal narrow" role="dialog" aria-modal="true" aria-label="系统信息">
     <div class="modal-head">
       <h3>系统信息</h3>
       <button class="icon-btn" id="btnCloseInfo" aria-label="关闭">✕</button>
