@@ -163,7 +163,7 @@ class Scanner:
         p = self.p
         self.start_ts = time.time()
         speed_secs = max(3, min(60, float(p.get("speedSecs", 8))))
-        speed_mb = max(10, min(1000, int(p.get("speedMB", 50))))
+        speed_mb = max(5, min(1000, int(p.get("speedMB", 5))))
         min_speed = max(0.0, min(10000.0, float(p.get("minSpeed", 0) or 0)))
         random_count = max(10, min(2000, int(p.get("randomCount", 150))))
         mode = (p.get("mode") or "").strip().upper()

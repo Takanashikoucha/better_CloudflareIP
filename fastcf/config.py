@@ -61,7 +61,7 @@ class ScanParams(BaseModel):
     colo: str = ""
     randomCount: int = Field(default=150, ge=10, le=2000)
     speedSecs: float = Field(default=8, ge=3, le=60)
-    speedMB: int = Field(default=50, ge=10, le=1000)
+    speedMB: int = Field(default=5, ge=5, le=1000)
     minSpeed: float = Field(default=0, ge=0, le=10000)
 
     def validate(self) -> str:
