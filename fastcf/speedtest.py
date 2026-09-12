@@ -83,64 +83,50 @@ def probe_location(ip: str, timeout: float = 4) -> tuple:
                 pass
 
 
-def speed_test(ip: str, speed_bytes: int, speed_secs: float,
-               is_cancelled=None) -> dict:
-    """单次连接完成 443/TLS 下载测速。
-
-    返回 {ip, port, ping, mbps, dc, cfRay, location}。
-    mbps 为时长内峰值（0 = CF 限流/失败）；ping 为 TCP+TLS 连接时延（仅记录，
-    排名以 ICMP 为准）。is_cancelled 为可调用对象，返回 True 时提前结束。
-    """
-    result = {"ip": ip, "port": config.SPEED_PORT, "ping": 0, "mbps": 0,
-              "dc": "", "cfRay": "", "location": ""}
+def _download_worker(ip: str, speed_bytes: int, speed_secs: float,
+                     is_cancelled, result: dict, conn_idx: int,
+                     total_conns: int, peak_bps: list, win_bytes: list,
+                     win_start: list, global_start: list, slow_bytes: list,
+                     slow_chunks: list):
+    """单个连接的下载 worker（多线程并发）。"""
     conn = None
     try:
         t0 = time.perf_counter()
         sock = socket.create_connection((ip, config.SPEED_PORT), timeout=3)
         conn = _ssl_ctx().wrap_socket(sock, server_hostname=config.SPEED_HOST)
-        result["ping"] = max(1, int((time.perf_counter() - t0) * 1000))
-        conn.settimeout(5)  # 短超时：取消响应 5s；数据流不断时 recv 不超时
+        if conn_idx == 0:
+            result["ping"] = max(1, int((time.perf_counter() - t0) * 1000))
+        conn.settimeout(5)
 
         req = (f"GET /__down?bytes={speed_bytes} HTTP/1.1\r\n"
                f"Host: {config.SPEED_HOST}\r\nUser-Agent: Mozilla/5.0 (FastCF)\r\n"
                f"Connection: close\r\n\r\n").encode()
         conn.sendall(req)
         head = _read_head(conn, 5)
-        if not head:
-            return result
-        meta = parse_cf_headers(head)
+        if conn_idx == 0 and head:
+            meta = parse_cf_headers(head)
+            cf_ray = meta.get("cf-ray", "")
+            if cf_ray:
+                result["cfRay"] = cf_ray
+                parts = cf_ray.split("-")
+                if len(parts) >= 2:
+                    result["dc"] = parts[-1].strip()
+            for k in ("country", "city", "colo"):
+                if k in meta and f"cf-meta-{k}" not in meta:
+                    meta[f"cf-meta-{k}"] = meta[k]
+            loc_parts = []
+            country_code = meta.get("cf-meta-country", "")
+            city = meta.get("cf-meta-city", "")
+            if country_code:
+                loc_parts.append(country_code)
+            if city and city not in ("0", "N/A"):
+                loc_parts.append(city)
+            if loc_parts:
+                result["location"] = "·".join(loc_parts)
 
-        cf_ray = meta.get("cf-ray", "")
-        if cf_ray:
-            result["cfRay"] = cf_ray
-            parts = cf_ray.split("-")
-            if len(parts) >= 2:
-                result["dc"] = parts[-1].strip()
-        # cf-meta-* 头（兼容无 cf-meta- 前缀的 country/city）
-        for k in ("country", "city", "colo"):
-            if k in meta and f"cf-meta-{k}" not in meta:
-                meta[f"cf-meta-{k}"] = meta[k]
-        loc_parts = []
-        country_code = meta.get("cf-meta-country", "")
-        city = meta.get("cf-meta-city", "")
-        if country_code:
-            loc_parts.append(country_code)
-        if city and city not in ("0", "N/A"):
-            loc_parts.append(city)
-        if loc_parts:
-            result["location"] = "·".join(loc_parts)
-
-        # 峰值速度：1 秒滑动窗口 + 首包快速淘汰
-        # 前 SPEED_SLOW_START_SECS 内累计 < SPEED_SLOW_START_BYTES（且已收到 ≥1 块）
-        # → 起步过慢（限流/坏 IP），提前结束返回 0，不浪费整个测速窗口；
-        # 窗口内零字节 → 直接 0。
-        peak_bps = 0.0
-        win_bytes, win_start = 0, time.time()
-        global_start = time.time()
-        slow_bytes = 0
-        slow_chunks = 0
-        buf = bytearray(65536)  # recv_into 复用 buffer，减少拷贝
-        while time.time() - global_start < speed_secs:
+        # 下载循环（共享滑动窗口）
+        buf = bytearray(65536)
+        while time.time() - global_start[0] < speed_secs:
             if is_cancelled and is_cancelled():
                 break
             try:
@@ -154,22 +140,18 @@ def speed_test(ip: str, speed_bytes: int, speed_secs: float,
             if not n:
                 break
             now = time.time()
-            if now - global_start < config.SPEED_SLOW_START_SECS:
-                slow_bytes += n
-                slow_chunks += 1
-            win_bytes += n
-            if now - win_start >= 1.0:
-                bps = win_bytes * 8 / (now - win_start)
-                if bps > peak_bps:
-                    peak_bps = bps
-                win_bytes, win_start = 0, now
-            if now - global_start >= config.SPEED_SLOW_START_SECS:
-                if slow_chunks >= 1 and slow_bytes < config.SPEED_SLOW_START_BYTES:
-                    break  # 起步过慢（限流/坏 IP）→ 提前结束，不浪费整个窗口
-        # 观察窗口内零字节 → 直接 0
-        if slow_chunks == 0 and peak_bps == 0 and win_bytes == 0:
-            return result
-        result["mbps"] = int(peak_bps / 1_000_000)
+            if now - global_start[0] < config.SPEED_SLOW_START_SECS:
+                slow_bytes[0] += n
+                slow_chunks[0] += 1
+            win_bytes[0] += n
+            if now - win_start[0] >= 1.0:
+                bps = win_bytes[0] * 8 / (now - win_start[0])
+                if bps > peak_bps[0]:
+                    peak_bps[0] = bps
+                win_bytes[0], win_start[0] = 0, now
+            if now - global_start[0] >= config.SPEED_SLOW_START_SECS:
+                if slow_chunks[0] >= 1 and slow_bytes[0] < config.SPEED_SLOW_START_BYTES:
+                    break
     except Exception:
         pass
     finally:
@@ -178,4 +160,44 @@ def speed_test(ip: str, speed_bytes: int, speed_secs: float,
                 conn.close()
             except Exception:
                 pass
+
+
+def speed_test(ip: str, speed_bytes: int, speed_secs: float,
+               is_cancelled=None) -> dict:
+    """多连接并发 443/TLS 下载测速（绕过 GFW 单连接限速）。
+
+    返回 {ip, port, ping, mbps, dc, cfRay, location}。
+    mbps 为时长内峰值（所有连接合计）；ping 为第一个连接的 TCP+TLS 时延。
+    is_cancelled 为可调用对象，返回 True 时提前结束。
+    """
+    result = {"ip": ip, "port": config.SPEED_PORT, "ping": 0, "mbps": 0,
+              "dc": "", "cfRay": "", "location": ""}
+
+    # 共享状态（列表包装，线程间共享）
+    peak_bps = [0.0]
+    win_bytes = [0]
+    win_start = [time.time()]
+    global_start = [time.time()]
+    slow_bytes = [0]
+    slow_chunks = [0]
+
+    import threading
+    threads = []
+    for i in range(config.SPEED_CONNS):
+        t = threading.Thread(
+            target=_download_worker,
+            args=(ip, speed_bytes, speed_secs, is_cancelled, result, i,
+                  config.SPEED_CONNS, peak_bps, win_bytes, win_start,
+                  global_start, slow_bytes, slow_chunks),
+            daemon=True
+        )
+        threads.append(t)
+        t.start()
+    for t in threads:
+        t.join()
+
+    # 观察窗口内零字节 → 直接 0
+    if slow_chunks[0] == 0 and peak_bps[0] == 0 and win_bytes[0] == 0:
+        return result
+    result["mbps"] = int(peak_bps[0] / 1_000_000)
     return result
