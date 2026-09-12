@@ -444,6 +444,7 @@ class Scanner:
         # ── C. 下载测速（443/TLS，并发 SPEED_WORKERS，按延迟升序提交）──
         # 提交顺序 = 延迟升序（最优 IP 优先拿到结果）；
         # 凑够 need 个达标 → 取消未开始的 future（已完成的保留）；
+        # 快速失败：前 3 个 IP 都 0Mbps → 提前停止（网络异常）；
         # 取消扫描 → 保留已完成结果。
         self.set_progress("speed", 45, "下载测速")
         sl_note = (f"，速度下限 {min_speed:g}Mbps" if min_speed > 0 else "") + f"，凑够 {need} 个即停"
@@ -451,8 +452,11 @@ class Scanner:
         results = []
         res_lock = threading.Lock()
         pending = {}  # future -> queue item
+        fail_count = 0  # 连续失败计数（快速失败用）
+        FAIL_LIMIT = 3  # 前 3 个都失败 → 提前停止
 
         def _measure(r):
+            nonlocal fail_count
             ip = r["ip"]
             # 随机 IP：测速前探测实际服务节点，确认 DC 并入池（同一 worker 内串行）
             if random_pool:
@@ -473,6 +477,8 @@ class Scanner:
             mark = " ✔达标" if ok else " ✘未达标"
             self.log(f"  {res['ip']}  ping {r['ping']}ms · 丢包 {r.get('loss', 0):.0%} · "
                      f"{res['mbps']} Mbps{mark} · {res['loc']}")
+            if not ok:
+                fail_count += 1
             return res, ok
 
         with ThreadPoolExecutor(max_workers=config.SPEED_WORKERS) as ex:
@@ -480,6 +486,9 @@ class Scanner:
                 if self._cancelled():
                     break
                 if len(results) >= need:
+                    break
+                if fail_count >= FAIL_LIMIT:
+                    self.log(f"快速失败：前 {FAIL_LIMIT} 个 IP 都 0Mbps，提前停止（网络异常或被拦截）", "error")
                     break
                 self.set_progress("speed", 45 + int(45 * i / max(1, len(queue_))),
                                  f"测速 {i + 1}/{len(queue_)}：{r['ip']}")

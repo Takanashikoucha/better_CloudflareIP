@@ -234,6 +234,16 @@ function renderResults() {
   const rows = (lastResult && lastResult.results) || [];
   body.innerHTML = "";
   empty.hidden = rows.length > 0;
+
+  // GFW 提示：检测速度 < 10 Mbps
+  const gfwNote = $("#gfwNote");
+  if (rows.length > 0) {
+    const maxSpeed = Math.max(...rows.map((r) => r.mbps || 0));
+    gfwNote.hidden = maxSpeed >= 10;
+  } else {
+    gfwNote.hidden = true;
+  }
+
   if (!rows.length) return;
 
   const maxPing = Math.max(...rows.map((r) => r.ping || 0), 1);

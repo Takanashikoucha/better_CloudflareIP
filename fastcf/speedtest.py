@@ -124,10 +124,13 @@ def _download_worker(ip: str, speed_bytes: int, speed_secs: float,
             if loc_parts:
                 result["location"] = "·".join(loc_parts)
 
-        # 下载循环（共享滑动窗口）
+        # 下载循环（共享滑动窗口 + 自适应提前结束）
         buf = bytearray(65536)
+        fast_stop = [False]  # 快速成功/失败标志（线程间共享）
         while time.time() - global_start[0] < speed_secs:
             if is_cancelled and is_cancelled():
+                break
+            if fast_stop[0]:
                 break
             try:
                 n = conn.recv_into(buf)
@@ -140,7 +143,8 @@ def _download_worker(ip: str, speed_bytes: int, speed_secs: float,
             if not n:
                 break
             now = time.time()
-            if now - global_start[0] < config.SPEED_SLOW_START_SECS:
+            elapsed = now - global_start[0]
+            if elapsed < config.SPEED_SLOW_START_SECS:
                 slow_bytes[0] += n
                 slow_chunks[0] += 1
             win_bytes[0] += n
@@ -149,7 +153,20 @@ def _download_worker(ip: str, speed_bytes: int, speed_secs: float,
                 if bps > peak_bps[0]:
                     peak_bps[0] = bps
                 win_bytes[0], win_start[0] = 0, now
-            if now - global_start[0] >= config.SPEED_SLOW_START_SECS:
+            # 快速失败：前 N 秒速度 < 阈值 → 提前结束
+            if elapsed >= config.SPEED_FAIL_STOP_SECS:
+                cur_bps = win_bytes[0] * 8 / max(0.1, now - win_start[0])
+                if cur_bps < config.SPEED_FAIL_STOP_MBPS * 1_000_000 and win_bytes[0] > 0:
+                    fast_stop[0] = True
+                    break
+            # 快速成功：前 N 秒速度 > 阈值 → 提前结束
+            if elapsed >= config.SPEED_FAST_STOP_SECS:
+                cur_bps = win_bytes[0] * 8 / max(0.1, now - win_start[0])
+                if cur_bps > config.SPEED_FAST_STOP_MBPS * 1_000_000:
+                    fast_stop[0] = True
+                    break
+            # 首包快速淘汰：观察窗口内累计 < 阈值 → 提前结束
+            if elapsed >= config.SPEED_SLOW_START_SECS:
                 if slow_chunks[0] >= 1 and slow_bytes[0] < config.SPEED_SLOW_START_BYTES:
                     break
     except Exception:
@@ -162,14 +179,9 @@ def _download_worker(ip: str, speed_bytes: int, speed_secs: float,
                 pass
 
 
-def speed_test(ip: str, speed_bytes: int, speed_secs: float,
-               is_cancelled=None) -> dict:
-    """多连接并发 443/TLS 下载测速（绕过 GFW 单连接限速）。
-
-    返回 {ip, port, ping, mbps, dc, cfRay, location}。
-    mbps 为时长内峰值（所有连接合计）；ping 为第一个连接的 TCP+TLS 时延。
-    is_cancelled 为可调用对象，返回 True 时提前结束。
-    """
+def _run_once(ip: str, speed_bytes: int, speed_secs: float,
+              is_cancelled) -> dict:
+    """单次多连接测速（内部函数，供重试调用）。"""
     result = {"ip": ip, "port": config.SPEED_PORT, "ping": 0, "mbps": 0,
               "dc": "", "cfRay": "", "location": ""}
 
@@ -200,4 +212,31 @@ def speed_test(ip: str, speed_bytes: int, speed_secs: float,
     if slow_chunks[0] == 0 and peak_bps[0] == 0 and win_bytes[0] == 0:
         return result
     result["mbps"] = int(peak_bps[0] / 1_000_000)
+    return result
+
+
+def speed_test(ip: str, speed_bytes: int, speed_secs: float,
+               is_cancelled=None) -> dict:
+    """多连接并发 443/TLS 下载测速（绕过 GFW 单连接限速 + 失败重试）。
+
+    返回 {ip, port, ping, mbps, dc, cfRay, location}。
+    mbps 为时长内峰值（所有连接合计）；ping 为第一个连接的 TCP+TLS 时延。
+    is_cancelled 为可调用对象，返回 True 时提前结束。
+    失败（0 Mbps）时自动重试 SPEED_RETRY 次（间隔 SPEED_RETRY_DELAY 秒）。
+    """
+    result = _run_once(ip, speed_bytes, speed_secs, is_cancelled)
+
+    # 失败重试（0 Mbps → 重试）
+    if result["mbps"] == 0 and config.SPEED_RETRY > 0:
+        for attempt in range(config.SPEED_RETRY):
+            if is_cancelled and is_cancelled():
+                break
+            time.sleep(config.SPEED_RETRY_DELAY)
+            retry = _run_once(ip, speed_bytes, speed_secs, is_cancelled)
+            # 取两次中较好的结果
+            if retry["mbps"] > result["mbps"]:
+                result = retry
+            if result["mbps"] > 0:
+                break  # 重试成功，停止
+
     return result

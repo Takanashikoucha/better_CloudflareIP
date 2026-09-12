@@ -34,10 +34,16 @@ PING_LAT_FACTOR = 2.0    # 平均时延 > 2× 最佳时延 淘汰（零丢包豁
 LOSS_CUTOFF = 0.75       # 丢包 ≥75% 淘汰 + 剔出池
 
 # ── 下载测速 ──
-SPEED_WORKERS = 4
-SPEED_CONNS = 4  # 每个 IP 的并发连接数（多连接绕过 GFW 单连接限速）        # 下载测速并发度（按延迟升序提交，凑够达标数即停）
+SPEED_WORKERS = 4        # IP 级并发度（同时测 4 个 IP）
+SPEED_CONNS = 4          # 每个 IP 的并发连接数（多连接绕过 GFW 单连接限速）
 SPEED_SLOW_START_SECS = 1.5   # 首包快速淘汰：观察窗口（秒）
 SPEED_SLOW_START_BYTES = 256 * 1024  # 窗口内累计低于此值（且已收到 ≥1 块）→ 起步过慢，提前结束
+SPEED_FAST_STOP_SECS = 2.0    # 快速成功：前 2 秒速度 > 50 Mbps → 提前结束
+SPEED_FAST_STOP_MBPS = 50     # 快速成功阈值（Mbps）
+SPEED_FAIL_STOP_SECS = 3.0    # 快速失败：前 3 秒速度 < 1 Mbps → 提前结束
+SPEED_FAIL_STOP_MBPS = 1      # 快速失败阈值（Mbps）
+SPEED_RETRY = 1             # 失败重试次数（0 = 不重试）
+SPEED_RETRY_DELAY = 2.0     # 重试间隔（秒）
 LOG_LIMIT = 1000         # 扫描日志环形缓冲上限
 
 # ── IP 池 ──
