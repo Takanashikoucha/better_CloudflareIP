@@ -1,4 +1,4 @@
-/* FastCF 前端逻辑（v4.0：浅色控制台 · SSE 实时流 · 状态单一来源 = 后端 AppState） */
+/* FastCF 前端逻辑（v5.0：深石墨蓝控制台 · SSE 增量日志流 · 状态单一来源 = 后端 AppState） */
 "use strict";
 
 const $ = (s) => document.querySelector(s);
@@ -17,7 +17,7 @@ const state = {
 let lastResult = null;
 let lastResultSource = "latest";   // "latest" | 历史 id
 let sse = null;
-let logN = 0;
+let localLogs = [];               // 本地日志数组（增量渲染；全量首帧时重置）
 let resSortKey = "ping";
 let resSortAsc = true;
 let coloGroups = [];
@@ -180,18 +180,13 @@ function openSSE() {
       $("#stageDetail").textContent = d.detail || "";
       $("#stageElapsed").textContent = fmtElapsed(d.elapsed);
     }
-    if (d.logs && d.logs.length) {
-      const box = $("#logBox");
-      const startN = logN;
-      logN = d.logs.length;
-      for (let i = Math.max(0, startN); i < d.logs.length; i++) {
-        const l = d.logs[i];
-        const div = document.createElement("div");
-        div.className = "logline" + (l.level && l.level !== "info" ? " " + l.level : "");
-        div.innerHTML = `<span class="ts">${esc(l.ts)}</span>${esc(l.msg)}`;
-        box.appendChild(div);
-      }
-      box.scrollTop = box.scrollHeight;
+    // 日志渲染：增量（logDelta）；全量首帧（logDelta 空 + logs 非空）→ 重置本地数组
+    if (d.logs && d.logs.length && !(d.logDelta && d.logDelta.length)) {
+      localLogs = d.logs.slice();
+      renderLogsFull();
+    } else if (d.logDelta && d.logDelta.length) {
+      localLogs.push(...d.logDelta);
+      renderLogsDelta(d.logDelta);
     }
     if (!d.running && (d.stage === "done" || d.stage === "error")) {
       setRunning(false, d.stage);
@@ -207,6 +202,28 @@ function openSSE() {
     }
   };
   sse.onerror = () => { /* EventSource 自动重连 */ };
+}
+
+/* ═══ 日志渲染（增量 / 全量）═══ */
+
+function logLineEl(l) {
+  const div = document.createElement("div");
+  div.className = "logline" + (l.level && l.level !== "info" ? " " + l.level : "");
+  div.innerHTML = `<span class="ts">${esc(l.ts)}</span>${esc(l.msg)}`;
+  return div;
+}
+
+function renderLogsDelta(delta) {
+  const box = $("#logBox");
+  for (const l of delta) box.appendChild(logLineEl(l));
+  box.scrollTop = box.scrollHeight;
+}
+
+function renderLogsFull() {
+  const box = $("#logBox");
+  box.innerHTML = "";
+  for (const l of localLogs) box.appendChild(logLineEl(l));
+  box.scrollTop = box.scrollHeight;
 }
 
 /* ═══ 结果表 ═══ */
@@ -230,8 +247,9 @@ function renderResults() {
     const tr = document.createElement("tr");
     const lossCls = r.loss >= 0.5 ? "loss-bad" : r.loss >= 0.2 ? "loss-mid" : "loss-good";
     const speedCls = r.mbps >= 100 ? "speed-high" : r.mbps >= 50 ? "speed-mid" : r.mbps > 0 ? "speed-low" : "speed-zero";
+    const rank = r.rank || (rows.indexOf(r) + 1);
     tr.innerHTML = `
-      <td class="w-n mono">${rows.indexOf(r) + 1}</td>
+      <td class="w-n"><span class="rank${rank === 1 ? " top" : ""}">${rank}</span></td>
       <td class="ip">${esc(r.ip)}<span class="sub mono">${esc(r.cfRay || "")}</span></td>
       <td><span class="dc-badge">${esc(r.dc || "—")}</span><span class="sub">${esc(r.location || r.dc_zh || "")}</span></td>
       <td><div class="ping-cell"><div class="ping-bar"><i style="width:${Math.min(100, (r.ping || 0) / maxPing * 100)}%"></i></div><b class="mono">${r.ping || 0}ms</b></div></td>
@@ -410,8 +428,8 @@ function startScan() {
       return;
     }
   }
-  logN = 0;
-  $("#logBox").innerHTML = "";
+  localLogs = [];
+  renderLogsFull();
   api("/api/scan", {
     method: "POST", headers: { "Content-Type": "application/json" },
     body: JSON.stringify({

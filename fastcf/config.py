@@ -33,6 +33,12 @@ PING_WORKERS = 200       # ping 并发度
 PING_LAT_FACTOR = 2.0    # 平均时延 > 2× 最佳时延 淘汰（零丢包豁免）
 LOSS_CUTOFF = 0.75       # 丢包 ≥75% 淘汰 + 剔出池
 
+# ── 下载测速 ──
+SPEED_WORKERS = 4        # 下载测速并发度（按延迟升序提交，凑够达标数即停）
+SPEED_SLOW_START_SECS = 1.5   # 首包快速淘汰：观察窗口（秒）
+SPEED_SLOW_START_BYTES = 256 * 1024  # 窗口内累计低于此值（且已收到 ≥1 块）→ 起步过慢，提前结束
+LOG_LIMIT = 1000         # 扫描日志环形缓冲上限
+
 # ── IP 池 ──
 POOL_SIZE = 50           # 每 DC 池上限
 TEST_SIZE = 50           # 指定 DC 扫描时从池最多取的数量

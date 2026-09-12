@@ -69,10 +69,13 @@ pool / history / sources → store → net
 |------|------|------|
 | `scanner` | `Scanner \| None` | 当前扫描编排器；`scanner.done` 事件是"是否运行中"的唯一判据 |
 | `last_result` / `last_params` | dict | 最近一次成功结果 + 参数 |
-| 锁 | `threading.Lock` | 保护 scanner 切换与 last_result 写入 |
+| `last_error` | `str \| None` | 最近一次扫描错误（scanner 被替换后仍可见，`status().error` 回退到此） |
+| 锁 | `threading.Lock` | 保护 scanner 切换与 last_result / last_error 写入 |
 
 扫描状态机：`idle → running → done / error / cancelled`。
-所有状态变更经 `Scanner._emit` 推送给 SSE 订阅者（200ms/2% 节流）。
+所有状态变更经 `Scanner._emit_state` 推送给 SSE 订阅者（200ms/2% 节流），
+附带**增量日志**（`logDelta` = 自上次推送以来新增；`logTotal` = 总条数）。
+迟到订阅者首帧拿全量 last_state（logs 完整 + logDelta 为空），前端据此重置本地日志数组。
 
 ### 4.2 持久化（store.py，全部原子写）
 
@@ -101,10 +104,12 @@ B. ping 预筛（并发 200）
    阶段 1：1 包探测，快速淘汰不可达
    阶段 2：4 包精确测量（仅存活者）
    淘汰规则：丢包 ≥75%（并从所属 DC 池剔除）；时延 > 2× 最佳（零丢包豁免）
-C. 下载测速（443/TLS，按延迟升序串行）
+C. 下载测速（443/TLS，4 路并发，按延迟升序提交）
    队列 = 全部预筛通过候选；随机 IP 测速前探测 cf-meta-colo 确认实际 DC 并入池
-   达标（≥minSpeed；minSpeed=0 时 >0 即达标）凑够 5 个 → 停止
+   （同一 worker 内串行）
+   达标（≥minSpeed；minSpeed=0 时 >0 即达标）凑够 5 个 → 取消未开始的 future
    未达标 → 继续测队列中下一个候选
+   首包快速淘汰：前 1.5s 累计 < 256KB（且已收到 ≥1 块）→ 起步过慢，提前结束返回 0
 D. 回退：DC 模式不足 5 个 → 随机模式再跑 B+C 补齐
 E. 汇总：测速成功（>0Mbps）的 IP 回写其实际 DC 池；
    按 延迟 → 丢包 → 速度 排序取前 5
@@ -130,13 +135,18 @@ E. 汇总：测速成功（>0Mbps）的 IP 回写其实际 DC 池；
 
 扫描参数：`mode`(DC/RANDOM) · `colo` · `randomCount`(10–2000) · `speedSecs`(3–60) · `speedMB`(10–1000) · `minSpeed`(0–10000)。
 
-## 7. UI 设计方向（浅色 Linear 式）
+## 7. UI 设计方向（深石墨蓝控制台 · OKLCH 令牌）
 
-- 浅色控制台：`#f7f8fa` 底 + 白色面板 + 发丝边框（1px `#e5e7eb` 系）+ 单一青色强调（`#0e7490`/`#22d3ee` 系）
+- 深石墨蓝底（`oklch(15% 0.012 255)` 系）+ 分层表面 3 级 + 发丝边框
+- 强调色：**lime 青柠**（`oklch(85% 0.17 130)` 系，`#a3e635`）——对深底对比度 **12.8:1**（WCAG AA 4.5 远超）
+- 状态色（绿/琥珀/红）低饱和，与强调色相分离，避免"状态色与强调色打架"
+- 全部颜色 **OKLCH 令牌** + `color-mix(in oklab)` 派生 hover/soft 态（不手挑第二组 hex）
+- 60-30-10：60% 深底 / 30% 表面层 / 10% lime 强调（仅主按钮、进度条、运行状态点、rank-1 徽章）
+- 可读性靠**明度分层**（character-first harmony），不靠色相
 - 等宽数据字体（JetBrains Mono 栈）用于 IP/延迟/速度等数值
-- 布局：顶部 appbar（品牌 + 运行指示 + 池/信息入口）→ KPI 数据状态条 → 双栏（左：扫描设置；右：进度/日志 + 结果/历史 tabs）
-- 交互：SSE 实时日志流、进度条、结果表按列排序、历史复用参数、IP 池管理弹窗、系统信息弹窗、toast 反馈
-- 动效克制：入场 fadeUp、状态点 pulse；无重阴影、无渐变滥用
+- 布局：顶部 appbar（品牌 + 运行状态胶囊 + 池/信息入口）→ KPI 数据状态条 → 双栏（左：扫描设置；右：进度/日志 + 结果/历史 tabs）
+- 交互：SSE 增量日志流（logDelta）、进度条、结果表 rank 徽章 + 按列排序、历史复用参数、IP 池管理弹窗、系统信息弹窗、toast 反馈
+- 动效克制：入场 fadeUp、状态点 pulse、进度条填充；`prefers-reduced-motion` 支持
 - `[hidden]` 全局 `display:none !important`，避免弹窗状态 bug 复发
 
 ## 8. 测试策略

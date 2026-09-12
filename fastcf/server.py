@@ -219,7 +219,11 @@ def api_stream():
                     "pct": item.get("pct"),
                     "detail": item.get("detail"),
                     "elapsed": item.get("elapsed"),
+                    # 日志增量推送：logDelta = 自上次推送以来新增；
+                    # 迟到订阅者首帧 logs 为全量（logDelta 为空），前端据此重置本地日志
                     "logs": item.get("logs", []),
+                    "logDelta": item.get("logDelta", []),
+                    "logTotal": item.get("logTotal", 0),
                     # 池统计随状态流实时下发（否则前端定时刷新会让池数"卡住"）
                     "pool_dc": len(rep),
                     "pool_ips": sum(rep.values()),

@@ -22,6 +22,7 @@ class AppState:
         self.scanner: Scanner | None = None
         self.last_result: dict | None = None
         self.last_params: dict | None = None
+        self.last_error: str | None = None
 
     # ── 扫描状态机 ──
 
@@ -42,6 +43,7 @@ class AppState:
         with self.lock:
             self.scanner = Scanner(params)
             self.last_result = None
+            self.last_error = None
             sc = self.scanner
         t = threading.Thread(target=self._run, args=(sc, params), daemon=True)
         t.start()
@@ -56,6 +58,10 @@ class AppState:
             # 兜底：无论 run() 以何种方式退出（含异常路径漏掉 done.set()），
             # 都保证 done 事件置位，否则 wait 方会永久挂起。
             sc.done.set()
+        # 错误持久化：scanner 被下次扫描替换后错误仍可见（status().error）
+        if sc.result_payload and "error" in sc.result_payload:
+            with self.lock:
+                self.last_error = sc.result_payload["error"]
         if sc.result_payload and "error" not in sc.result_payload:
             with self.lock:
                 self.last_result = sc.result_payload
@@ -73,9 +79,12 @@ class AppState:
             sc = self.scanner
             result = self.last_result
             params = self.last_params
+            last_error = self.last_error
         out = {}
         if sc is not None and sc.result_payload and "error" in sc.result_payload:
             out["error"] = sc.result_payload["error"]
+        elif last_error:
+            out["error"] = last_error
         if result:
             out["result"] = result
             out["params"] = params

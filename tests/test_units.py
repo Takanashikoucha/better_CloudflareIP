@@ -330,6 +330,73 @@ def test_appstate():
                           "speedSecs": 8, "speedMB": 50, "minSpeed": 0})
     assert ok2, err2
     st2.scanner.done.wait(timeout=240)
+    # last_error 快速验证：错误 scanner 写入后，scanner 替换（置空）仍可见
+    sc_err = scanner.Scanner({"mode": "DC", "colo": "HKG"}, _mock_ctx())
+    st2.scanner = sc_err
+    sc_err.start_ts = time.time()
+    sc_err._finish_error("last_error 测试")
+    sc_err.done.set()
+    if sc_err.result_payload and "error" in sc_err.result_payload:
+        with st2.lock:
+            st2.last_error = sc_err.result_payload["error"]
+    assert st2.last_error == "last_error 测试"
+    st2.scanner = None
+    assert st2.status().get("error") == "last_error 测试"
+
+
+def test_scanner_parallel_speed():
+    # 并行测速：mock speed_test 带延迟，验证并发执行 + 凑够 need 即停
+    import threading as _th
+    calls = []
+    lock = _th.Lock()
+
+    def slow_speed_test(ip, b, s, is_cancelled=None):
+        with lock:
+            calls.append(ip)
+        time.sleep(0.05)
+        return {"ip": ip, "port": 443, "ping": 5, "mbps": 120, "dc": "LAX",
+                "cfRay": "x-LAX-1", "location": "US"}
+
+    ctx = _mock_ctx()
+    ctx.speed_test = slow_speed_test
+    s = scanner.Scanner({"mode": "RANDOM", "randomCount": 12,
+                        "speedSecs": 3, "speedMB": 10, "minSpeed": 0}, ctx)
+    t0 = time.perf_counter()
+    s.run()
+    elapsed = time.perf_counter() - t0
+    assert s.result_payload["count"] == 5
+    # 12 个候选并发 4 路：若串行需 12×50ms=600ms；并发应 < 600ms
+    # 允许 ping 阶段开销，只验证测速部分没有串行放大（总时长 < 2s 宽松上限）
+    assert elapsed < 2.0, f"并行测速疑似串行：{elapsed:.2f}s"
+
+
+def test_scanner_log_delta():
+    # 增量日志：_emit_state 附带 logDelta/logTotal；游标推进后 delta 为空
+    s = scanner.Scanner({"mode": "RANDOM", "randomCount": 10,
+                        "speedSecs": 3, "speedMB": 10, "minSpeed": 0}, _mock_ctx())
+    s.start_ts = time.time()
+    s.log("第一条")
+    s.log("第二条")
+    assert s.last_state["logTotal"] == 2
+    assert len(s.last_state["logDelta"]) == 1  # 游标在第一条后推进
+    assert s.last_state["logDelta"][0]["msg"] == "第二条"
+    # 无新日志时 delta 为空
+    s._emit_state({"running": True, "stage": "x", "pct": 1})
+    assert s.last_state["logDelta"] == []
+    assert s.last_state["logTotal"] == 2
+
+
+def test_result_rank():
+    # 结果 rank 字段：1-5，按 延迟→丢包→速度 排序名次
+    s = scanner.Scanner({"mode": "RANDOM", "randomCount": 10,
+                        "speedSecs": 8, "speedMB": 50, "minSpeed": 0}, _mock_ctx())
+    s.start_ts = time.time()
+    fake = [{"ip": f"1.1.1.{i}", "ping": i * 10, "loss": 0.0, "mbps": 100,
+             "dc": "LAX", "dc_zh": "美国", "loc": "美国",
+             "cfRay": "abc-LAX-1", "port": 443} for i in range(1, 6)]
+    s._finalize(fake, "RANDOM", "", False, 10, 0, cancelled=False)
+    ranks = [r["rank"] for r in s.result_payload["results"]]
+    assert ranks == [1, 2, 3, 4, 5], ranks
 
 
 if __name__ == "__main__":

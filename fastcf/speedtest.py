@@ -130,10 +130,15 @@ def speed_test(ip: str, speed_bytes: int, speed_secs: float,
         if loc_parts:
             result["location"] = "·".join(loc_parts)
 
-        # 峰值速度：1 秒滑动窗口
+        # 峰值速度：1 秒滑动窗口 + 首包快速淘汰
+        # 前 SPEED_SLOW_START_SECS 内累计 < SPEED_SLOW_START_BYTES（且已收到 ≥1 块）
+        # → 起步过慢（限流/坏 IP），提前结束返回 0，不浪费整个测速窗口；
+        # 窗口内零字节 → 直接 0。
         peak_bps = 0.0
         win_bytes, win_start = 0, time.time()
         global_start = time.time()
+        slow_bytes = 0
+        slow_chunks = 0
         buf = bytearray(65536)  # recv_into 复用 buffer，减少拷贝
         while time.time() - global_start < speed_secs:
             if is_cancelled and is_cancelled():
@@ -148,13 +153,22 @@ def speed_test(ip: str, speed_bytes: int, speed_secs: float,
                 break
             if not n:
                 break
-            win_bytes += n
             now = time.time()
+            if now - global_start < config.SPEED_SLOW_START_SECS:
+                slow_bytes += n
+                slow_chunks += 1
+            win_bytes += n
             if now - win_start >= 1.0:
                 bps = win_bytes * 8 / (now - win_start)
                 if bps > peak_bps:
                     peak_bps = bps
                 win_bytes, win_start = 0, now
+            if now - global_start >= config.SPEED_SLOW_START_SECS:
+                if slow_chunks >= 1 and slow_bytes < config.SPEED_SLOW_START_BYTES:
+                    break  # 起步过慢（限流/坏 IP）→ 提前结束，不浪费整个窗口
+        # 观察窗口内零字节 → 直接 0
+        if slow_chunks == 0 and peak_bps == 0 and win_bytes == 0:
+            return result
         result["mbps"] = int(peak_bps / 1_000_000)
     except Exception:
         pass

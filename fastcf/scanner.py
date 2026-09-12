@@ -67,6 +67,7 @@ class Scanner:
         self.start_ts = None
         self._last_emit = 0.0   # set_progress 节流（monotonic）
         self._last_pct = -100
+        self._log_total = 0     # 已推送日志条数（增量推送游标）
         self.elapsed = 0
         self.done = threading.Event()
 
@@ -94,10 +95,27 @@ class Scanner:
         with self._lock:
             logs = list(self.last_state.get("logs", [])) if self.last_state else []
             logs.append({"ts": ts, "msg": msg, "level": level})
-            if len(logs) > 400:
-                logs = logs[-400:]
+            if len(logs) > config.LOG_LIMIT:
+                # 环形裁剪：同步推进增量游标，避免 delta 越界
+                cut = len(logs) - config.LOG_LIMIT
+                logs = logs[cut:]
+                self._log_total = max(0, self._log_total - cut)
             self.last_state = {**self.last_state, "logs": logs} if self.last_state else {"logs": logs}
-        self._emit(self.last_state)
+        self._emit_state(self.last_state)
+
+    def _emit_state(self, base: dict):
+        """统一出口：附加增量日志（logDelta/logTotal）后推送。
+
+        增量语义：logDelta = 自上次推送以来新增的日志；
+        迟到订阅者首帧拿全量 last_state（logs 完整 + logDelta 为空），
+        前端据此重置本地日志数组。
+        """
+        with self._lock:
+            logs = self.last_state.get("logs", []) if self.last_state else []
+            delta = logs[self._log_total:]
+            self._log_total = len(logs)
+        base = {**base, "logs": logs, "logDelta": delta, "logTotal": len(logs)}
+        self._emit(base)
 
     def set_progress(self, stage, pct, detail=""):
         # 节流：至少 200ms 间隔，或 pct 前进 ≥2 才推送，避免 ping 2000 IP 时 SSE 刷屏
@@ -108,14 +126,12 @@ class Scanner:
                 return
             self._last_emit = now
             self._last_pct = pct
-            logs = self.last_state.get("logs", []) if self.last_state else []
-        self._emit({
+        self._emit_state({
             "running": True,
             "stage": stage,
             "pct": pct,
             "detail": detail,
             "elapsed": int(time.time() - self.start_ts) if self.start_ts else 0,
-            "logs": logs,
         })
 
     def subscribe(self):
@@ -240,8 +256,9 @@ class Scanner:
             -r.get("mbps", 0),
         ))
         out = []
-        for r in speed_results[:config.RESULT_COUNT]:
+        for i, r in enumerate(speed_results[:config.RESULT_COUNT]):
             out.append({
+                "rank": i + 1,
                 "ip": r["ip"],
                 "ping": r.get("ping", 0),
                 "latency": r.get("ping", 0),
@@ -276,17 +293,15 @@ class Scanner:
         self.log(f"扫描{'已取消' if cancelled else '完成'}，用时 {self.elapsed} 秒，"
                  f"返回 {len(out)} 个结果{suffix}（按 延迟/丢包/速度 排序）",
                  "warn" if cancelled else "ok")
-        self._emit({"running": False, "stage": "done", "pct": 100, "detail": "",
-                    "elapsed": self.elapsed,
-                    "logs": self.last_state.get("logs", [])})
+        self._emit_state({"running": False, "stage": "done", "pct": 100, "detail": "",
+                          "elapsed": self.elapsed})
         self.done.set()
 
     def _finish_error(self, msg):
         self.log(msg, "error")
         self.result_payload = {"error": msg}
-        self._emit({"running": False, "stage": "error", "pct": 100, "detail": msg,
-                    "elapsed": int(time.time() - (self.start_ts or time.time())),
-                    "logs": self.last_state.get("logs", [])})
+        self._emit_state({"running": False, "stage": "error", "pct": 100, "detail": msg,
+                          "elapsed": int(time.time() - (self.start_ts or time.time()))})
         self.done.set()
 
     # ── 事件性池重验（池过期且被指定 DC 扫描用到时，前台同步执行）──
@@ -426,23 +441,21 @@ class Scanner:
         if len(queue_) > 15:
             self.log(f"  …（其余 {len(queue_) - 15} 个候选略）")
 
-        # ── C. 下载测速（443/TLS，按延迟升序串行，队列 = 全部预筛通过候选）──
+        # ── C. 下载测速（443/TLS，并发 SPEED_WORKERS，按延迟升序提交）──
+        # 提交顺序 = 延迟升序（最优 IP 优先拿到结果）；
+        # 凑够 need 个达标 → 取消未开始的 future（已完成的保留）；
+        # 取消扫描 → 保留已完成结果。
         self.set_progress("speed", 45, "下载测速")
         sl_note = (f"，速度下限 {min_speed:g}Mbps" if min_speed > 0 else "") + f"，凑够 {need} 个即停"
-        self.log(f"开始下载测速（队列 {len(queue_)} 个{sl_note}）")
+        self.log(f"开始下载测速（队列 {len(queue_)} 个，并发 {config.SPEED_WORKERS}{sl_note}）")
         results = []
-        for i, r in enumerate(queue_):
-            if self._cancelled():
-                return results
-            if len(results) >= need:
-                break
+        res_lock = threading.Lock()
+        pending = {}  # future -> queue item
+
+        def _measure(r):
             ip = r["ip"]
-            self.set_progress("speed", 45 + int(45 * i / max(1, len(queue_))),
-                             f"测速 {i + 1}/{len(queue_)}：{ip}")
-            # 随机 IP：测速前探测实际服务节点，确认 DC 并入池
+            # 随机 IP：测速前探测实际服务节点，确认 DC 并入池（同一 worker 内串行）
             if random_pool:
-                self.set_progress("speed", 45 + int(45 * i / max(1, len(queue_))),
-                                 f"探测 {ip} 实际节点…")
                 _cc, colo_hit, _city = self.ctx.probe_location(ip)
                 if colo_hit:
                     self.ctx.pool.add(colo_hit.upper(), [ip], save=True)
@@ -451,8 +464,6 @@ class Scanner:
                     self.log(f"  {ip} 探测未读到实际节点，继续测速", "warn")
             res = self.ctx.speed_test(ip, speed_mb * 1024 * 1024, speed_secs,
                                       is_cancelled=self._cancelled)
-            if self._cancelled():
-                return results
             res["dc_zh"] = self.ctx.colos.zh(res.get("dc", ""))
             res["loc"] = res.get("dc_zh") or res.get("location") or ""
             res["ping"] = r["ping"]
@@ -462,6 +473,33 @@ class Scanner:
             mark = " ✔达标" if ok else " ✘未达标"
             self.log(f"  {res['ip']}  ping {r['ping']}ms · 丢包 {r.get('loss', 0):.0%} · "
                      f"{res['mbps']} Mbps{mark} · {res['loc']}")
-            if ok:
-                results.append(res)
+            return res, ok
+
+        with ThreadPoolExecutor(max_workers=config.SPEED_WORKERS) as ex:
+            for i, r in enumerate(queue_):
+                if self._cancelled():
+                    break
+                if len(results) >= need:
+                    break
+                self.set_progress("speed", 45 + int(45 * i / max(1, len(queue_))),
+                                 f"测速 {i + 1}/{len(queue_)}：{r['ip']}")
+                fut = ex.submit(_measure, r)
+                pending[fut] = r
+            # 按完成顺序收集；凑够 need 个达标即取消未开始的 future
+            for fut in as_completed(pending):
+                if self._cancelled():
+                    break
+                try:
+                    res, ok = fut.result()
+                except Exception:
+                    res, ok = None, False
+                if res is not None and ok:
+                    with res_lock:
+                        results.append(res)
+                if len(results) >= need:
+                    for f in pending:
+                        f.cancel()
+                    break
+        if self._cancelled():
+            self.log(f"已取消：保留 {len(results)} 个已完成测速结果", "warn")
         return results
