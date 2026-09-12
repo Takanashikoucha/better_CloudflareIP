@@ -31,7 +31,7 @@ _pools_ts: float = 0             # 整体最后刷新时间
 def _load():
     global _pool, _pool_ts, _pools_ts
     pools, pool_ts = store.load_pools()
-    _pool = pools
+    _pool = pools if pools else {}
     _pool_ts = pool_ts
     try:
         d = store.read_json(store.POOL_FILE, {})
@@ -41,6 +41,7 @@ def _load():
 
 
 def _save():
+    global _pool
     store.save_pools(_pool or {}, _pool_ts)
 
 
@@ -55,18 +56,29 @@ def _ensure_loaded():
 def get(code: str) -> list:
     """取某 DC 的 IP 池（可能为空）。"""
     _ensure_loaded()
-    return list((_pool or {}).get(code.upper(), []))
+    with _lock:
+        return list((_pool or {}).get(code.upper(), []))
+
+
+def _get_pool():
+    """获取池引用（调用方需持锁）。"""
+    global _pool
+    if _pool is None:
+        _pool = {}
+    return _pool
 
 
 def size(code: str) -> int:
-    return len(get(code))
+    _ensure_loaded()
+    with _lock:
+        return len((_pool or {}).get(code.upper(), []))
 
 
 def add(code: str, ips: list, save: bool = True):
     """把验证成功的 IP 并入指定 DC 的池（去重、保持顺序、超上限保留最新）。"""
     _ensure_loaded()
     with _lock:
-        pool = _pool.setdefault(code.upper(), [])
+        pool = _get_pool().setdefault(code.upper(), [])
         changed = False
         for ip in ips:
             if ip and ip not in pool:
@@ -87,7 +99,7 @@ def remove(code: str, ips: list):
     """从指定 DC 的池中剔除 IP。"""
     _ensure_loaded()
     with _lock:
-        pool = _pool.get(code.upper())
+        pool = _get_pool().get(code.upper())
         if not pool:
             return
         before = len(pool)
@@ -100,7 +112,7 @@ def remove_ip(code: str, ip: str) -> bool:
     """从指定 DC 的池中删除单个 IP，返回是否删除成功。"""
     _ensure_loaded()
     with _lock:
-        pool = _pool.get(code.upper())
+        pool = _get_pool().get(code.upper())
         if not pool or ip not in pool:
             return False
         pool.remove(ip)
@@ -112,52 +124,69 @@ def touch(code: str):
     """刷新某 DC 池的时间戳（事件性重验成功时调用）。"""
     _ensure_loaded()
     with _lock:
-        if code.upper() in (_pool or {}):
+        if code.upper() in _get_pool():
             _pool_ts[code.upper()] = time.time()
             global _pools_ts
             _pools_ts = time.time()
             _save()
 
 
+def _clear_locked():
+    """清空全部池（调用方需持锁）。返回总 IP 数。"""
+    global _pool, _pool_ts, _pools_ts
+    n = sum(len(v) for v in _get_pool().values())
+    _pool = {}
+    _pool_ts = {}
+    _pools_ts = 0
+    if n:
+        _save()
+    return n
+
+
 def expired(code: str = "") -> bool:
     """池是否超过 TTL。code 非空 → 判断单 DC；为空 → 判断整体。
     从未保存过（时间戳 0）不视为过期。"""
     _ensure_loaded()
-    if code:
-        ts = _pool_ts.get(code.upper(), 0)
-        return bool(ts) and time.time() - ts > config.POOL_TTL
-    return bool(_pools_ts) and time.time() - _pools_ts > config.POOL_TTL
+    with _lock:
+        if code:
+            ts = _pool_ts.get(code.upper(), 0)
+            return bool(ts) and time.time() - ts > config.POOL_TTL
+        return bool(_pools_ts) and time.time() - _pools_ts > config.POOL_TTL
 
 
 def build_ip_index() -> dict:
     """构建 {ip: dc} 反向索引，供批量定位使用（O(1) 查找）。"""
     _ensure_loaded()
-    idx = {}
-    for code, ips in (_pool or {}).items():
-        for ip in ips:
-            idx[ip] = code
+    with _lock:
+        idx = {}
+        for code, ips in _get_pool().items():
+            for ip in ips:
+                idx[ip] = code
     return idx
 
 
 def pool_report() -> dict:
     """池统计：{code: n}。"""
     _ensure_loaded()
-    return {c: len(v) for c, v in (_pool or {}).items() if v}
+    with _lock:
+        return {c: len(v) for c, v in _get_pool().items() if v}
 
 
 def pools_detail() -> list:
     """池明细（前端面板）：[{code, cc, cc_zh, size, ips, expired}]，按 size 降序。"""
     from . import colos
-    rep = pool_report()
+    _ensure_loaded()
+    with _lock:
+        snapshot = {c: list(v) for c, v in _get_pool().items()}
     out = []
-    for code, n in rep.items():
+    for code, ips in snapshot.items():
         cc = colos.colos.country(code) or ""
         out.append({
             "code": code,
             "cc": cc,
             "cc_zh": colos.country_zh(cc) if cc else "",
-            "size": n,
-            "ips": list((_pool or {}).get(code, [])),
+            "size": len(ips),
+            "ips": ips,
             "expired": expired(code),
         })
     out.sort(key=lambda x: (-x["size"], x["code"]))
@@ -168,8 +197,8 @@ def clear_pool(code: str) -> int:
     """清空指定 DC 的池，返回被删 IP 数。"""
     _ensure_loaded()
     with _lock:
-        n = len(_pool.get(code.upper(), []))
-        _pool.pop(code.upper(), None)
+        n = len(_get_pool().get(code.upper(), []))
+        _get_pool().pop(code.upper(), None)
         _pool_ts.pop(code.upper(), None)
         if n:
             _save()
@@ -178,16 +207,18 @@ def clear_pool(code: str) -> int:
 
 def clear_all() -> int:
     """清空全部池，返回总 IP 数。"""
-    global _pool, _pool_ts, _pools_ts
     _ensure_loaded()
     with _lock:
-        n = sum(len(v) for v in (_pool or {}).values())
+        return _clear_locked()
+
+
+def reset():
+    """重置池状态（测试用，不持久化）。"""
+    global _pool, _pool_ts, _pools_ts
+    with _lock:
         _pool = {}
         _pool_ts = {}
         _pools_ts = 0
-        if n:
-            _save()
-    return n
 
 
 def probe_and_add(ips: list, code_hint: str = "", workers: int = 12, log=None) -> dict:

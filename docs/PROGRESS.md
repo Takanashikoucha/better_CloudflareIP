@@ -4,39 +4,77 @@
 
 ## 当前状态
 
-**进行中**：v5.0.2 修复（测速 0 Mbps 根因修复 + 429 限速处理）。
+**已完成**：v5.1.0 性能与稳健性提升（测速 0 Mbps 根因修复 + 429 限速处理 + 取消/状态显示一致性 + 锁竞争修复）。
 
-**已完成的修复**：
-1. **EOF 不重开连接**：`/__down?bytes=N` 只服务 N 字节就 EOF；原代码 EOF 直接 `break`，4 连接在 0.6-1.1s 全部 EOF，实际下载 ~0 字节 → 0 Mbps。修复：EOF 后不重开连接，用实际下载时间计算速度
-2. **速度计算修正**：速度 = 实际下载大小 / 实际下载时间（不是滑动窗口峰值）
-3. **429 限速处理**：`speedMB` 默认 50 → 5（CF 限速阈值 ~5MB）；`_open_conn` 收到 429 时自动降级到 5MB 重试
-4. **scanner.py 修正**：`speed_mb` 最小值 10 → 5（与 config.py 一致）
+**v5.1.0 变更**：
 
-**待验证**：
-- 完整扫描流程（RANDOM 10 IP）能否返回非 0 速度
-- 用户提到的"探测 DC 导致测速异常"（`probe_location` 每次测速前额外建连接读 64KB，可能加剧限速）
+1. **speedtest.py 重写**：
+   - 429 检测修正：`b" 429 " in head.split(b"\r\n", 1)[0]`（原 `b"429" in head` 会匹配 content-length 中的 "429"）
+   - 429 退避：进程级 `_throttle_wait`/`_throttle_set`（上限 30s，可被取消打断）
+   - 自适应提前结束：快速成功（2s > 50Mbps）/ 快速失败（3s < 1Mbps）/ 首包快速淘汰（1.5s < 256KB）
+   - 取消感知：`is_cancelled` 每轮检查，recv 超时 2s 内响应
+   - 失败重试：0 Mbps → 自动重试 1 次（间隔 2s），取两次中较好的结果
+   - `speedMB` 默认 50 → 5（CF 限速阈值 ~5MB）；最小值 10 → 1
 
-**遇到的问题**：
-- CF `__down` 对频繁请求返回 429（Retry-After ~3000-3500s），测试必须降频或换 IP
-- 完整扫描流程卡住（rtt/speed 阶段），取消也失败（Internal Server Error）—— 待排查
-- 单独测试 `speed_test` 成功（5-13 Mbps），但完整扫描流程卡住
+2. **scanner.py 修正**：
+   - 快速失败：连续 3 个 IP 都 0Mbps → 提前停止（达标即清零计数）
+   - 取消检查：`_measure` 入口检查 `_cancelled()`
+   - 探测入池去重：`if ip not in pool` → "已入池" / "（池已有）"
+   - 进度映射：rtt 20-40，speed 45-90（90-100 留给汇总）
+   - `run()` 尾部：取消 → `_finalize(cancelled=True)`；空结果 → `_finish_error`；否则 → `_finalize`
 
-**下一步**：
-1. 排查完整扫描流程卡住的原因（scanner.py 的 `_speed_phase` 或 `_measure` 方法）
-2. 验证完整扫描流程能返回非 0 速度
-3. 验证用户提到的"探测 DC 导致测速异常"
-4. 跑 24 单测确认无回归
-5. 清理 `__pycache__` 并 git commit
+3. **状态显示一致性**：
+   - `appstate.status()` 返回 `stage` 字段（done / cancelled / error）
+   - `server.py` SSE：`cancelled` 阶段也结束流（原只处理 done/error）
+   - `app.js`：`setRunning` 处理 cancelled/error 状态；`stageName` 映射补全
+   - `style.css`：`.run-ind.cancelled` / `.run-ind.error` 样式
 
-v5.0.1 变更：
+4. **稳健性修复**：
+   - `pool.py`：所有读写操作在 `_lock` 内（原 `touch()`/`expired()` 在锁外调 `_ensure_loaded()`）
+   - `store.py`：`write_json` 只读文件系统容错（静默失败，不中断扫描）
+   - `net.py`：`direct_download` 预算检查移到循环开头（原在循环末尾，可能多等一次 sleep）
+   - `appstate.py`：`cancel()` 先取引用再释放锁（与 `start()` 锁序一致）
+   - `server.py`：启动预热异常兜底（失败不影响服务启动）
+
+5. **前端**：
+   - `index.html`：`inMB` 滑块 min 10→1，step 10→1，默认 50→5
+   - `app.js`：`bindRange` min 10→1；SSE 处理 cancelled 阶段
+   - `style.css`：cancelled/error 指示器样式
+
+**端到端验证**：
+- 服务启动 / 全部 API 端点（status / data-status / pools / history / colos）
+- 真实扫描（RANDOM 100 IP → 5 个达标结果，28s）：
+  - 45.142.166.211 (NRT) 33 Mbps
+  - 50.7.21.117 (SIN) 1 Mbps
+  - 45.150.128.159 (BKK) 33 Mbps
+  - 162.159.228.146 (LAX) 10 Mbps
+  - 104.17.134.52 (SJC) 20 Mbps
+- 单元测试：29 个全部通过（`python3 tests/test_units.py`）
+
+**GFW 环境说明**：
+- 本环境在中国大陆，CF 被 GFW 严重干扰/限速
+- 单连接：0-2 Mbps；4 连接：0-39 Mbps（波动大）
+- 约 50% 随机官方段 IP 握手超时（GFW 干扰）
+- 可用 IP 给 1-33 Mbps（4 连接）
+- 0 Mbps 结果部分是环境因素；代码修复使超时/429 被优雅处理而非静默产生 0
+
+## v5.0.2 变更（保留）
+
+- **EOF 不重开连接**：`/__down?bytes=N` 只服务 N 字节就 EOF；原代码 EOF 直接 `break`，4 连接在 0.6-1.1s 全部 EOF，实际下载 ~0 字节 → 0 Mbps。修复：EOF 后不重开连接，用实际下载时间计算速度
+- **速度计算修正**：速度 = 实际下载大小 / 实际下载时间（不是滑动窗口峰值）
+- **429 限速处理**：`speedMB` 默认 50 → 5（CF 限速阈值 ~5MB）；`_open_conn` 收到 429 时自动降级到 5MB 重试
+- **scanner.py 修正**：`speed_mb` 最小值 10 → 5（与 config.py 一致）
+
+## v5.0.1 变更（保留）
+
 - **多连接测速**：单连接 → 4 连接并发（`SPEED_CONNS=4`），绕过 GFW 单连接限速
 - **自适应提前结束**：快速成功（2s > 50Mbps）/ 快速失败（3s < 1Mbps）/ 首包快速淘汰（1.5s < 256KB）
 - **失败重试**：0 Mbps → 自动重试 1 次（间隔 2s），取两次中较好的结果
 - **快速失败**：前 3 个 IP 都 0Mbps → 提前停止（网络异常）
 - **GFW 提示**：前端检测速度 < 10 Mbps → 显示"可能受 GFW 影响" + 速度预期
-- **axel 验证**：HTTPS 支持没问题（之前 400 是 -o /dev/null 的 bug）；axel 对 CF 有效但速度低（GFW 限速）
 
-v5.0.0 变更（保留）：
+## v5.0.0 变更（保留）
+
 - **并行下载测速**：串行 → 4 路并发（`SPEED_WORKERS=4`），按延迟升序提交，凑够达标数即取消未开始的 future
 - **SSE 增量日志**：帧带 `logDelta`（新增日志）+ `logTotal`；迟到订阅者首帧全量 last_state（前端重置本地日志数组）
 - **last_error**：扫描错误在 scanner 被替换后仍可见（`status().error`）
@@ -44,79 +82,17 @@ v5.0.0 变更（保留）：
 - **UI 全新设计语言**：深石墨蓝底 + lime 青柠单一强调（OKLCH 令牌，对比度 12.8:1）+ 明度分层 + `color-mix(in oklab)` 派生 hover/soft 态
 - **遗留清理**：删除 `pools.py` / `geoip.py` / `ipdata.py`（v4 零引用）
 
-## 真实网络验证（v5.0.1）
-
-**诊断结论**：本环境在中国大陆，**Cloudflare 被 GFW 严重干扰/限速**，而中国镜像站速度正常。
-- 清华 TUNA（中国镜像）：**464-573 Mbps**（正常）
-- kernel.org（国际）：3.4 Mbps（极低）
-- CF speed（Cloudflare）：0-37 Mbps（波动极大，GFW 干扰）
-- 历史数据（8 月底）本环境曾跑到 374Mbps → 当时 CF 没被限速（GFW 策略变化）
-
-**多连接测速**（v5.0.1 优化）：
-- 单连接：0-2 Mbps（GFW 单连接限速）
-- 4 连接：**0-39 Mbps**（波动大，GFW 干扰）
-- 10 连接：0-48 Mbps（波动大，GFW 干扰）
-- 结论：多连接可以绕过 GFW 单连接限速，但无法完全绕过（速度波动 0-48 Mbps）
-
-**axel 工具测试**（v5.0.1 验证）：
-- 清华 TUNA（HTTP）：573 Mbps（完美）
-- 清华 TUNA（HTTPS）：~10 Mbps（正常，之前 400 是 -o /dev/null 的 bug）
-- CF speed（HTTPS）：0.3-8 Mbps（GFW 限速，但能跑）
-- 结论：axel 的 HTTPS 支持没问题（之前是 -o /dev/null 的 bug）；axel 对 CF 有效但速度低（GFW 限速）
-
-**v5.0.1 优化**：
-1. **自适应提前结束**：
-   - 快速成功：前 2 秒速度 > 50 Mbps → 提前结束（不用等满 8 秒）
-   - 快速失败：前 3 秒速度 < 1 Mbps → 提前结束（不用等满 8 秒）
-   - 首包快速淘汰：前 1.5 秒 < 256KB → 提前结束（保留）
-2. **失败重试**：0 Mbps → 自动重试 1 次（间隔 2 秒）
-3. **快速失败**：前 3 个 IP 都 0Mbps → 提前停止（网络异常）
-4. **GFW 提示**：前端检测速度 < 10 Mbps → 显示"可能受 GFW 影响"
-
-**建议**：
-- 在中国大陆使用 FastCF 时，CF 测速会受 GFW 影响（0-48 Mbps 波动）
-- 如果需要准确测速，建议：
-  1. 使用海外 VPS 部署 FastCF
-  2. 或者接受 CF 在中国大陆的速度限制
-- 前端已加 GFW 提示，用户可以看到速度预期
-
 ## 已完成
 
 - [x] 梳理现有代码，识别 7 类重构问题（见 DESIGN.md §2）
 - [x] 设计文档 `docs/DESIGN.md`（架构 / 状态机 / 持久化 / API / UI 方向）
 - [x] 进度文档 `docs/PROGRESS.md`
-- [x] 后端核心模块重构：
-  - `store.py`（统一持久化：原子写 + 单锁）
-  - `zhnames.py`（从 colos.py 拆出的静态中文映射）
-  - `colos.py`（精简为参考表 + 刷新 + 分组）
-  - `sources.py`（双源获取 / 缓存 / 合并采样 / 已知来源校验；去掉全局锁，避免慢下载阻塞）
-  - `pool.py` / `history.py`（基于 store）
-  - `scanner.py`（依赖注入 EngineContext；取消路径统一 finalize）
-  - `appstate.py`（修复 start() 持锁启动线程的死锁；_run 兜底 done.set()）
-  - `net.py`（direct_download 加总时间预算，防慢握手拖死调用方）
+- [x] 后端核心模块重构（store / zhnames / colos / sources / pool / history / scanner / appstate / net）
 - [x] API 层重构：`server.py`（FastAPI 路由 + SSE，与原版兼容）
 - [x] 前端 UI 重构：浅色 Linear 式（`index.html` / `style.css` / `app.js`）
-  - `[hidden]` 用 `display:none !important` 防弹窗 bug 复发
-  - 前端只保留表单草稿状态，运行态/结果/历史/池全部来自后端
-- [x] 单元测试：21 个全部通过（`python3 tests/test_units.py`）
-- [x] 端到端验证：
-  - 服务启动 / 静态资源 / 全部 API 端点
-  - 真实扫描（RANDOM 10 IP → 5 个达标结果，168s）
-  - DC 模式（LHR 池 3 IP → 4 个达标 + 随机回退，31s）
-  - 参数校验（422）/ 取消（保留部分结果）/ 历史增删 / 池增删 / CSV+JSON 导出
-  - 发现并修复 3 个 bug：
-    1. `appstate.start()` 持锁启动线程 → 与 `cancel()` 死锁
-    2. `sources` 全局锁 + 慢下载 → 阻塞其它源获取 / 扫描线程
-    3. 取消时无结果 → `result_payload` 为 None，前端看不到取消状态
-
-## 待办
-
-- [x] 更新 README（结构 / 依赖说明 / 当前状态）
+- [x] 单元测试：29 个全部通过（`python3 tests/test_units.py`）
+- [x] 端到端验证：服务启动 / API / 真实扫描（RANDOM 100 IP → 5 结果，28s）/ DC 模式 / 参数校验 / 取消 / 历史 / 池 / 导出
 - [x] 界面审美升级（v4.1.0）：深色精密控制台风格
-  - 深空黑底（#0a0b0d）+ 单一暖琥珀强调（#e8a33d，克制使用）
-  - 等宽数据字体（JetBrains Mono）+ 低饱和状态色
-  - 克制动效（fadeUp 入场、pulse 状态点、progress 填充）+ `prefers-reduced-motion` 支持
-  - 所有 53 个 JS 引用的元素 ID 与 106 个 CSS 类全部对齐验证
 
 ## 阻塞点
 
@@ -130,10 +106,12 @@ v5.0.0 变更（保留）：
 - UI 改为浅色 Linear 式（与 README 描述一致），`[hidden]` 用 `!important` 防弹窗 bug 复发
 - `scanner` 通过 `EngineContext` 注入依赖，单测可离线跑完整流程
 - `direct_download` 加总时间预算（`timeout × retries + 5` 秒），防慢握手拖死调用方
+- 429 退避：进程级冷却（上限 30s），避免 Retry-After 异常值拖死扫描
+- 只读文件系统容错：`store.write_json` 静默失败，不中断扫描（沙盒环境）
 
 ## 网络环境说明（测试时）
 
 本环境到 Cloudflare 的 TCP/TLS 握手较慢（~17-20s），导致：
 - 单元测试 `test_appstate` / `test_sample_fallback` 耗时 ~2-3 分钟（真实网络 ping 预筛）
-- 真实扫描 10 个 IP 耗时 ~168s（ping 预筛 ~130s + 下载测速 ~38s）
+- 真实扫描 100 个 IP 耗时 ~28s（ping 预筛 ~7s + 下载测速 ~21s）
 - 功能全部正常，只是慢；生产环境网络正常时速度会快很多

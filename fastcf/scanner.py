@@ -163,7 +163,7 @@ class Scanner:
         p = self.p
         self.start_ts = time.time()
         speed_secs = max(3, min(60, float(p.get("speedSecs", 8))))
-        speed_mb = max(5, min(1000, int(p.get("speedMB", 5))))
+        speed_mb = max(1, min(1000, int(p.get("speedMB", 5))))
         min_speed = max(0.0, min(10000.0, float(p.get("minSpeed", 0) or 0)))
         random_count = max(10, min(2000, int(p.get("randomCount", 150))))
         mode = (p.get("mode") or "").strip().upper()
@@ -353,6 +353,7 @@ class Scanner:
         pn = len(ips)
         if pn == 0:
             return []
+        # 进度映射：ping 预筛 20-40，下载测速 45-90（90-100 留给汇总）
 
         # ── B. ping 预筛（两阶段：1 包探测 + 4 包精确测量，并发 200）──
         # 阶段 1：1 包探测（快速淘汰不可达）
@@ -444,7 +445,7 @@ class Scanner:
         # ── C. 下载测速（443/TLS，并发 SPEED_WORKERS，按延迟升序提交）──
         # 提交顺序 = 延迟升序（最优 IP 优先拿到结果）；
         # 凑够 need 个达标 → 取消未开始的 future（已完成的保留）；
-        # 快速失败：前 3 个 IP 都 0Mbps → 提前停止（网络异常）；
+        # 快速失败：连续 3 个 IP 都 0Mbps → 提前停止（网络异常）；
         # 取消扫描 → 保留已完成结果。
         self.set_progress("speed", 45, "下载测速")
         sl_note = (f"，速度下限 {min_speed:g}Mbps" if min_speed > 0 else "") + f"，凑够 {need} 个即停"
@@ -453,17 +454,25 @@ class Scanner:
         res_lock = threading.Lock()
         pending = {}  # future -> queue item
         fail_count = 0  # 连续失败计数（快速失败用）
-        FAIL_LIMIT = 3  # 前 3 个都失败 → 提前停止
+        FAIL_LIMIT = 3  # 连续 3 个都失败 → 提前停止
+        submitted = 0   # 已提交测速的候选数（进度用）
+        total_q = len(queue_)
 
         def _measure(r):
             nonlocal fail_count
             ip = r["ip"]
+            if self._cancelled():
+                return None, False
             # 随机 IP：测速前探测实际服务节点，确认 DC 并入池（同一 worker 内串行）
             if random_pool:
                 _cc, colo_hit, _city = self.ctx.probe_location(ip)
                 if colo_hit:
-                    self.ctx.pool.add(colo_hit.upper(), [ip], save=True)
-                    self.log(f"  {ip} 实际节点 {self.ctx.colos.zh(colo_hit)} ({colo_hit})，已入池")
+                    # 去重：池里已有该 IP 时不重复入池（避免重复日志）
+                    if ip not in self.ctx.pool.get(colo_hit.upper()):
+                        self.ctx.pool.add(colo_hit.upper(), [ip], save=True)
+                        self.log(f"  {ip} 实际节点 {self.ctx.colos.zh(colo_hit)} ({colo_hit})，已入池")
+                    else:
+                        self.log(f"  {ip} 实际节点 {self.ctx.colos.zh(colo_hit)} ({colo_hit})（池已有）")
                 else:
                     self.log(f"  {ip} 探测未读到实际节点，继续测速", "warn")
             res = self.ctx.speed_test(ip, speed_mb * 1024 * 1024, speed_secs,
@@ -479,6 +488,8 @@ class Scanner:
                      f"{res['mbps']} Mbps{mark} · {res['loc']}")
             if not ok:
                 fail_count += 1
+            else:
+                fail_count = 0  # 连续失败计数：达标即清零
             return res, ok
 
         with ThreadPoolExecutor(max_workers=config.SPEED_WORKERS) as ex:
@@ -488,12 +499,13 @@ class Scanner:
                 if len(results) >= need:
                     break
                 if fail_count >= FAIL_LIMIT:
-                    self.log(f"快速失败：前 {FAIL_LIMIT} 个 IP 都 0Mbps，提前停止（网络异常或被拦截）", "error")
+                    self.log(f"快速失败：连续 {FAIL_LIMIT} 个 IP 都 0Mbps，提前停止（网络异常或被拦截）", "error")
                     break
-                self.set_progress("speed", 45 + int(45 * i / max(1, len(queue_))),
-                                 f"测速 {i + 1}/{len(queue_)}：{r['ip']}")
+                self.set_progress("speed", 45 + int(45 * i / max(1, total_q)),
+                                 f"测速 {i + 1}/{total_q}：{r['ip']}")
                 fut = ex.submit(_measure, r)
                 pending[fut] = r
+                submitted += 1
             # 按完成顺序收集；凑够 need 个达标即取消未开始的 future
             for fut in as_completed(pending):
                 if self._cancelled():

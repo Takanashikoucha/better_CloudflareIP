@@ -93,8 +93,9 @@
             <input type="range" id="inSecs" value="8" min="3" max="60" step="1">
           </div>
           <div class="field">
-            <label>测速流量（MB）<span class="numval" id="valMB">50</span></label>
-            <input type="range" id="inMB" value="50" min="10" max="1000" step="10">
+            <label>测速流量（MB）<span class="numval" id="valMB">5</span></label>
+            <input type="range" id="inMB" value="5" min="1" max="1000" step="1">
+            <div class="hint">CF 限速阈值约 5MB；超过易触发 429（自动退避重试）</div>
           </div>
         </div>
 

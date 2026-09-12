@@ -69,12 +69,19 @@ class AppState:
             history.add(sc.result_payload, params)
 
     def cancel(self):
+        # 注意：先取 scanner 引用再释放锁，再调 cancel（与 start() 的锁序一致，
+        # 避免 self.lock → scanner._lock 的锁序与 start() 冲突）
         with self.lock:
-            if self.scanner:
-                self.scanner.cancel()
+            sc = self.scanner
+        if sc:
+            sc.cancel()
 
     def status(self) -> dict:
-        """当前扫描状态 + 最近一次结果（/api/status）。"""
+        """当前扫描状态 + 最近一次结果（/api/status）。
+
+        状态语义：running（运行中）/ done（完成）/ error（错误）/ cancelled（已取消）。
+        取消后 result_payload 含 cancelled=True，前端据此显示"已取消"。
+        """
         with self.lock:
             sc = self.scanner
             result = self.last_result
@@ -83,11 +90,15 @@ class AppState:
         out = {}
         if sc is not None and sc.result_payload and "error" in sc.result_payload:
             out["error"] = sc.result_payload["error"]
+            out["stage"] = "error"
         elif last_error:
             out["error"] = last_error
+            out["stage"] = "error"
         if result:
             out["result"] = result
             out["params"] = params
+            # 最近一次结果的完成状态（done / cancelled）
+            out["stage"] = "cancelled" if result.get("cancelled") else "done"
         out["running"] = self.running
         return out
 

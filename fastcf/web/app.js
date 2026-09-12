@@ -154,7 +154,10 @@ function setRunning(running, stage) {
   const ind = $("#runInd"), txt = $("#runTxt");
   ind.classList.toggle("busy", running);
   ind.classList.toggle("done", !running && stage === "done");
-  txt.textContent = running ? (stageName(stage) + "…") : (stage === "error" ? "出错" : "空闲");
+  ind.classList.toggle("cancelled", !running && stage === "cancelled");
+  ind.classList.toggle("error", !running && stage === "error");
+  txt.textContent = running ? (stageName(stage) + "…")
+    : (stage === "error" ? "出错" : stage === "cancelled" ? "已取消" : "空闲");
   $("#btnScan").disabled = running;
   $("#btnScanTxt").textContent = running ? "扫描中…" : "开始优选";
   $("#btnCancel").hidden = !running;
@@ -188,17 +191,24 @@ function openSSE() {
       localLogs.push(...d.logDelta);
       renderLogsDelta(d.logDelta);
     }
-    if (!d.running && (d.stage === "done" || d.stage === "error")) {
+    if (!d.running && (d.stage === "done" || d.stage === "error" || d.stage === "cancelled")) {
       setRunning(false, d.stage);
       if (d.stage === "done") {
         $("#stageName").textContent = "完成";
         $("#stagePct").textContent = "100%";
         $("#stageFill").style.width = "100%";
-        loadLatest();
-        refreshDataStatus();
-        refreshPools();
-        refreshHistory();
+      } else if (d.stage === "cancelled") {
+        $("#stageName").textContent = "已取消";
+        $("#stagePct").textContent = "—";
+        $("#stageFill").style.width = "100%";
+      } else {
+        $("#stageName").textContent = "出错";
+        $("#stagePct").textContent = "—";
       }
+      loadLatest();
+      refreshDataStatus();
+      refreshPools();
+      refreshHistory();
     }
   };
   sse.onerror = () => { /* EventSource 自动重连 */ };
@@ -283,6 +293,8 @@ function loadLatest() {
       lastResult = d.result;
       lastResultSource = "latest";
       renderResults();
+      // 同步完成状态（done / cancelled / error）到运行指示器
+      if (d.stage && !d.running) setRunning(false, d.stage);
     }
   }).catch(() => {});
 }
@@ -461,7 +473,7 @@ function initControls() {
   $("#dcSearch").oninput = () => fillDCSelect($("#dcSearch").value);
   bindRange("#inRandCount", "randomCount", "#valRand", [10, 2000]);
   bindRange("#inSecs", "speedSecs", "#valSecs", [3, 60]);
-  bindRange("#inMB", "speedMB", "#valMB", [10, 1000]);
+  bindRange("#inMB", "speedMB", "#valMB", [1, 1000]);
   $("#inMinSpeed").onchange = () => {
     state.minSpeed = Math.max(0, Math.min(10000, +$("#inMinSpeed").value || 0));
   };

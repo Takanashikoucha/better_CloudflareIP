@@ -39,7 +39,11 @@ def read_json(path, default):
 
 def write_json(path, obj):
     with _lock:
-        atomic_write(path, json.dumps(obj, ensure_ascii=False))
+        try:
+            atomic_write(path, json.dumps(obj, ensure_ascii=False))
+        except OSError as e:
+            # 只读文件系统（如沙盒环境）：静默失败，不中断扫描
+            print(f"[store] 写入失败 {path.name}（{e}），继续使用内存数据", flush=True)
 
 
 def read_text(path):

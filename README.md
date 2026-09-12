@@ -1,6 +1,6 @@
 # FastCF — Cloudflare IP 优选测速（Linux · 直连）
 
-> **v5.0.1 优化完成**：继续本任务前，先读取 `docs/DESIGN.md`（设计文档）
+> **v5.1.0 性能与稳健性提升完成**：继续本任务前，先读取 `docs/DESIGN.md`（设计文档）
 > 与 `docs/PROGRESS.md`（进度文档）。当前状态见进度文档"当前状态"一行。
 
 > 基于 Python 3 + FastAPI 的 Cloudflare IP 优选工具：固定 **IPv4 · 443/TLS · 结果 5 个**，

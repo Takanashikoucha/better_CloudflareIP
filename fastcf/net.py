@@ -16,6 +16,8 @@ def direct_download(url: str, timeout: int = 30, retries: int = 3) -> str:
     t0 = time.monotonic()
     last_err = None
     for attempt in range(retries):
+        if time.monotonic() - t0 > budget:
+            break  # 预算耗尽，不再尝试
         try:
             req = urllib.request.Request(url, headers={"User-Agent": "FastCF/4.0"})
             opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))

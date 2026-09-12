@@ -370,6 +370,130 @@ def test_scanner_parallel_speed():
     assert elapsed < 2.0, f"并行测速疑似串行：{elapsed:.2f}s"
 
 
+def test_scanner_fast_fail():
+    # 快速失败：连续 3 个 IP 都 0Mbps → 提前停止（不再测后续候选）
+    # 注意：4 路并发下，fail_count 在提交循环中检查（非完成循环），
+    # 所以最多测 4+3=7 个（第一轮 4 个 + 第二轮 3 个触发 fail_count>=3）
+    import threading as _th
+    calls = []
+    lock = _th.Lock()
+
+    def zero_speed_test(ip, b, s, is_cancelled=None):
+        with lock:
+            calls.append(ip)
+        return {"ip": ip, "port": 443, "ping": 5, "mbps": 0, "dc": "",
+                "cfRay": "", "location": ""}
+
+    ctx = _mock_ctx()
+    ctx.speed_test = zero_speed_test
+    s = scanner.Scanner({"mode": "RANDOM", "randomCount": 20,
+                        "speedSecs": 3, "speedMB": 10, "minSpeed": 0}, ctx)
+    s.run()
+    # 快速失败后走 _finish_error（result_payload 含 error 字段）
+    assert "error" in s.result_payload, f"快速失败应走 error 路径：{s.result_payload}"
+    # 4 路并发：第一轮 4 个全失败（fail_count=4），第二轮提交时 fail_count>=3 → 停止
+    # 所以最多测 4 个（第一轮）+ 0 个（第二轮被阻止）= 4 个
+    # 但 as_completed 可能让第二轮部分 future 已提交，所以放宽到 8
+    assert len(calls) <= 8, f"快速失败未生效：测了 {len(calls)} 个"
+
+
+def test_scanner_cancel_mid_speed():
+    # 取消：测速进行中取消 → 保留已完成结果，走 _finalize（cancelled=True）
+    import threading as _th
+    ev = _th.Event()
+
+    def slow_speed_test(ip, b, s, is_cancelled=None):
+        ev.wait(timeout=5)  # 等待取消信号
+        return {"ip": ip, "port": 443, "ping": 5, "mbps": 120, "dc": "LAX",
+                "cfRay": "x-LAX-1", "location": "US"}
+
+    ctx = _mock_ctx()
+    ctx.speed_test = slow_speed_test
+    s = scanner.Scanner({"mode": "RANDOM", "randomCount": 10,
+                        "speedSecs": 3, "speedMB": 10, "minSpeed": 0}, ctx)
+    t = _th.Thread(target=s.run)
+    t.start()
+    time.sleep(0.5)  # 等待进入测速阶段
+    s.cancel()
+    ev.set()  # 释放被阻塞的 speed_test
+    t.join(timeout=10)
+    assert s.done.is_set()
+    assert s.result_payload is not None
+    assert s.result_payload.get("cancelled") is True
+
+
+def test_appstate_status_stage():
+    # status() 返回 stage 字段（done / cancelled / error），供前端显示
+    from fastcf.appstate import AppState
+    st = AppState()
+    # 无扫描：无 stage
+    assert "stage" not in st.status()
+    # 错误 scanner
+    sc_err = scanner.Scanner({"mode": "DC", "colo": "HKG"}, _mock_ctx())
+    st.scanner = sc_err
+    sc_err.start_ts = time.time()
+    sc_err._finish_error("测试错误")
+    sc_err.done.set()
+    with st.lock:
+        st.last_error = "测试错误"
+    assert st.status().get("stage") == "error"
+    # 取消 scanner
+    sc_cancel = scanner.Scanner({"mode": "DC", "colo": "HKG"}, _mock_ctx())
+    st.scanner = sc_cancel
+    sc_cancel.start_ts = time.time()
+    sc_cancel._finalize([], "DC", "HKG", False, 10, 0, cancelled=True)
+    with st.lock:
+        st.last_result = sc_cancel.result_payload
+    assert st.status().get("stage") == "cancelled"
+    # 完成 scanner
+    sc_done = scanner.Scanner({"mode": "DC", "colo": "HKG"}, _mock_ctx())
+    st.scanner = sc_done
+    sc_done.start_ts = time.time()
+    fake = [{"ip": "1.1.1.1", "ping": 10, "loss": 0.0, "mbps": 100,
+             "dc": "LAX", "dc_zh": "美国", "loc": "美国",
+             "cfRay": "abc-LAX-1", "port": 443}]
+    sc_done._finalize(fake, "DC", "HKG", False, 10, 0, cancelled=False)
+    with st.lock:
+        st.last_result = sc_done.result_payload
+    assert st.status().get("stage") == "done"
+
+
+def test_speedtest_429_throttle():
+    # 429 退避：收到 429 后设置冷却期，后续连接先等待
+    from fastcf import speedtest
+    # 重置（防止前一个测试残留）
+    speedtest._throttle_until = 0
+    # 初始无冷却
+    assert speedtest._throttle_until <= time.monotonic()
+    # 设置 429 冷却（10s）
+    speedtest._throttle_set(10)
+    assert speedtest._throttle_until > time.monotonic()
+    # 冷却期内，_throttle_wait 应等待（用取消打断验证）
+    ev = [False]
+    def is_cancelled():
+        return ev[0]
+    t0 = time.monotonic()
+    ev[0] = True  # 立即取消
+    speedtest._throttle_wait(is_cancelled)
+    assert time.monotonic() - t0 < 1.5  # 取消打断，不应等满 10s
+    # 重置
+    speedtest._throttle_until = 0
+
+
+def test_speedtest_parse_headers():
+    # 响应头解析：cf-ray / cf-meta-* 头
+    from fastcf import speedtest
+    head = b"HTTP/1.1 200 OK\r\nCF-RAY: abc123-LAX-1\r\nCF-META-COLO: LAX\r\nCF-META-COUNTRY: US\r\nCF-META-CITY: Los Angeles\r\nContent-Length: 100\r\n\r\n"
+    meta = speedtest.parse_cf_headers(head)
+    assert meta["cf-ray"] == "abc123-LAX-1"
+    assert meta["cf-meta-colo"] == "LAX"
+    assert meta["cf-meta-country"] == "US"
+    # 429 检测
+    head429 = b"HTTP/1.1 429 Too Many Requests\r\nRetry-After: 3000\r\n\r\n"
+    m429 = speedtest.parse_cf_headers(head429)
+    assert m429.get("retry-after") == "3000"
+
+
 def test_scanner_log_delta():
     # 增量日志：_emit_state 附带 logDelta/logTotal；游标推进后 delta 为空
     s = scanner.Scanner({"mode": "RANDOM", "randomCount": 10,

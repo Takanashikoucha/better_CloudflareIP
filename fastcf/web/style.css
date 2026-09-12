@@ -134,12 +134,16 @@ code { font-family: var(--mono); font-size: .9em; background: var(--inset); padd
 }
 .run-ind.busy { border-color: var(--accent-line); color: var(--text); }
 .run-ind.done { border-color: color-mix(in oklab, var(--ok) 40%, transparent); }
+.run-ind.cancelled { border-color: color-mix(in oklab, var(--warn) 40%, transparent); color: var(--warn); }
+.run-ind.error { border-color: color-mix(in oklab, var(--err) 40%, transparent); color: var(--err); }
 .run-dot {
   width: 8px; height: 8px; border-radius: 50%;
   background: var(--text-faint); flex: 0 0 auto;
 }
 .run-ind.busy .run-dot { background: var(--accent); animation: pulse 1.6s var(--ease) infinite; }
 .run-ind.done .run-dot { background: var(--ok); }
+.run-ind.cancelled .run-dot { background: var(--warn); }
+.run-ind.error .run-dot { background: var(--err); }
 @keyframes pulse { 0%,100% { opacity: 1; box-shadow: 0 0 0 0 var(--accent-soft); } 50% { opacity: .55; box-shadow: 0 0 0 5px var(--accent-soft); } }
 
 .icon-btn {

@@ -33,10 +33,16 @@ def _load_static():
 def _startup():
     _load_static()
     # 后台预热：colo 参考数据 + 双源 IP 缓存（均带 TTL，失败沿用旧缓存/快照）
+    # 异常兜底：预热失败不影响服务启动（TTL 机制会在下次访问时重试）
     from . import sources
-    threading.Thread(target=colos.colos.refresh, daemon=True).start()
-    threading.Thread(target=sources.fetch_cf_ips, daemon=True).start()
-    threading.Thread(target=sources.fetch_external_ips, daemon=True).start()
+    def _safe(fn):
+        try:
+            fn()
+        except Exception as e:
+            print(f"[startup] 预热失败（{fn.__name__}）：{e}", flush=True)
+    threading.Thread(target=lambda: _safe(colos.colos.refresh), daemon=True).start()
+    threading.Thread(target=lambda: _safe(sources.fetch_cf_ips), daemon=True).start()
+    threading.Thread(target=lambda: _safe(sources.fetch_external_ips), daemon=True).start()
 
 
 # ── 静态页面 ──
@@ -207,6 +213,9 @@ def api_stream():
                 try:
                     item = q.get(timeout=15)
                 except Exception:
+                    # 超时：检查扫描是否已结束（兜底，防止 done 事件丢失导致前端挂起）
+                    if sc.done.is_set():
+                        break
                     yield b": ping\n\n"
                     continue
                 if item is None:
