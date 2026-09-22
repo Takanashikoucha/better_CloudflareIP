@@ -1,4 +1,6 @@
-/* FastCF 前端逻辑（v5.0：深石墨蓝控制台 · SSE 增量日志流 · 状态单一来源 = 后端 AppState） */
+/* FastCF 前端逻辑（v6.0：浅色极简 · SSE 增量日志流 · 状态单一来源 = 后端 AppState）
+   简化原则：默认只显示 模式 + 预设 两层控件；高级参数折叠；
+   历史/IP 池/系统信息 收进右侧抽屉，主界面只剩 设置 + 进度 + 结果。 */
 "use strict";
 
 const $ = (s) => document.querySelector(s);
@@ -9,19 +11,17 @@ const state = {
   mode: "DC",
   colo: "",
   randomCount: 150,
-  speedSecs: 8,
-  speedMB: 50,
+  speedSecs: 5,
+  speedMB: 5,
   minSpeed: 0,
 };
 
 let lastResult = null;
-let lastResultSource = "latest";   // "latest" | 历史 id
 let sse = null;
-let localLogs = [];               // 本地日志数组（增量渲染；全量首帧时重置）
+let localLogs = [];
 let resSortKey = "ping";
 let resSortAsc = true;
 let coloGroups = [];
-let dataStatus = null;
 
 /* ═══ 工具 ═══ */
 
@@ -101,6 +101,29 @@ function setMode(m) {
   $("#fRand").hidden = m !== "RANDOM";
 }
 
+/* ═══ 测速预设（快速 / 精准）═══ */
+
+const PRESETS = {
+  fast: { speedSecs: 5, speedMB: 5, minSpeed: 0 },
+  acc: { speedSecs: 15, speedMB: 10, minSpeed: 50 },
+};
+
+function applyPreset(name) {
+  const p = PRESETS[name];
+  state.speedSecs = p.speedSecs;
+  state.speedMB = p.speedMB;
+  state.minSpeed = p.minSpeed;
+  $("#inSecs").value = p.speedSecs;
+  $("#inMB").value = p.speedMB;
+  $("#inMinSpeed").value = p.minSpeed;
+  ["#inSecs", "#inMB"].forEach((id) => $(id).dispatchEvent(new Event("input")));
+  $$(".preset").forEach((b) => {
+    const on = (b.id === "preFast" && name === "fast") || (b.id === "preAcc" && name === "acc");
+    b.classList.toggle("on", on);
+    b.setAttribute("aria-checked", on);
+  });
+}
+
 /* ═══ DC 下拉（国家分组 + 搜索）═══ */
 
 function fillDCSelect(filter) {
@@ -132,19 +155,21 @@ function fillDCSelect(filter) {
   if ($("#selDC").value !== state.colo && state.colo) $("#selDC").value = state.colo;
 }
 
-/* ═══ 数据状态条 ═══ */
+/* ═══ 状态条（数据源 + 池 + 节点 + 版本）═══ */
 
 function refreshDataStatus() {
   api("/api/data-status").then((d) => {
-    dataStatus = d;
-    $("#stCidr").textContent = d.cf_cidrs || "—";
-    $("#stCidrSub").textContent = d.cf_ts ? "更新 " + fmtAgo(d.cf_ts) : "尚未获取";
-    $("#stExt").textContent = d.ext_ips ? d.ext_ips.toLocaleString() : "—";
-    $("#stExtSub").textContent = d.ext_ts ? "更新 " + fmtAgo(d.ext_ts) : "尚未获取";
-    $("#stPool").textContent = d.pool_ips ? `${d.pool_dc} / ${d.pool_ips}` : "—";
-    $("#stPoolSub").textContent = d.pool_expired ? "池已过期（事件性重验）" : "节点 / IP 数";
+    const src = d.cf_cidrs ? d.cf_cidrs : 0;
+    const ext = d.ext_ips || 0;
+    $("#stSrcVal").textContent = `${src} 段 / ${ext ? ext.toLocaleString("en-US") : 0} IP`;
+    const flag = $("#stSrcFlag");
+    const worst = (d.src_health_official === "missing" || d.src_health_external === "missing") ? "missing"
+      : (d.src_health_official === "stale" || d.src_health_external === "stale") ? "stale" : "";
+    flag.className = "stat-flag " + worst;
+    flag.textContent = worst === "stale" ? "（已过期，沿用旧缓存）" : worst === "missing" ? "（未获取）" : "";
+    $("#stPool").textContent = `${d.pool_dc} 节点 / ${d.pool_ips} IP`;
     $("#stColo").textContent = d.colo_count || "—";
-    $("#stVer").textContent = `v${d.version} · Python ${d.python}`;
+    $("#stVer").textContent = `v${d.version} · Py ${d.python}`;
   }).catch(() => {});
 }
 
@@ -173,8 +198,9 @@ function openSSE() {
     try { d = JSON.parse(e.data); } catch (err) { return; }
     if (d.type === "none") return;
     if (d.pool_dc != null) {
-      $("#stPool").textContent = `${d.pool_dc} / ${d.pool_ips}`;
+      $("#stPool").textContent = `${d.pool_dc} 节点 / ${d.pool_ips} IP`;
     }
+    if (d.throttled) $("#throttleNote").hidden = false;
     if (d.running) {
       setRunning(true, d.stage);
       $("#stageName").textContent = stageName(d.stage);
@@ -236,7 +262,7 @@ function renderLogsFull() {
   box.scrollTop = box.scrollHeight;
 }
 
-/* ═══ 结果表 ═══ */
+/* ═══ 结果表（5 列：# / IP / 节点 / 延迟 / 速度）═══ */
 
 function renderResults() {
   const body = $("#resBody");
@@ -265,15 +291,13 @@ function renderResults() {
 
   for (const r of sorted) {
     const tr = document.createElement("tr");
-    const lossCls = r.loss >= 0.5 ? "loss-bad" : r.loss >= 0.2 ? "loss-mid" : "loss-good";
     const speedCls = r.mbps >= 100 ? "speed-high" : r.mbps >= 50 ? "speed-mid" : r.mbps > 0 ? "speed-low" : "speed-zero";
     const rank = r.rank || (rows.indexOf(r) + 1);
     tr.innerHTML = `
       <td class="w-n"><span class="rank${rank === 1 ? " top" : ""}">${rank}</span></td>
-      <td class="ip">${esc(r.ip)}<span class="sub mono">${esc(r.cfRay || "")}</span></td>
+      <td class="ip">${esc(r.ip)}<span class="sub">${esc(r.cfRay || "")}</span></td>
       <td><span class="dc-badge">${esc(r.dc || "—")}</span><span class="sub">${esc(r.location || r.dc_zh || "")}</span></td>
       <td><div class="ping-cell"><div class="ping-bar"><i style="width:${Math.min(100, (r.ping || 0) / maxPing * 100)}%"></i></div><b class="mono">${r.ping || 0}ms</b></div></td>
-      <td class="mono ${lossCls}">${((r.loss || 0) * 100).toFixed(0)}%</td>
       <td class="mono ${speedCls}">${r.mbps} Mbps</td>
       <td class="w-act"><button class="btn-ghost" data-copy="${esc(r.ip)}" title="复制 IP">复制</button></td>`;
     body.appendChild(tr);
@@ -291,9 +315,7 @@ function loadLatest() {
   api("/api/status").then((d) => {
     if (d.result) {
       lastResult = d.result;
-      lastResultSource = "latest";
       renderResults();
-      // 同步完成状态（done / cancelled / error）到运行指示器
       if (d.stage && !d.running) setRunning(false, d.stage);
     }
   }).catch(() => {});
@@ -318,10 +340,8 @@ function refreshHistory() {
       const item = document.createElement("div");
       item.className = "hist-item";
       item.innerHTML = `
-        <div class="hist-main">
-          <div class="hist-time mono">${esc(h.time)}${h.cancelled ? ' <span class="cancelled-tag">（已取消）</span>' : ""}</div>
-          <div class="hist-params">${esc(modeTxt)} · 测速 ${p.speedSecs}s/${p.speedMB}MB${p.minSpeed ? " · 下限 " + p.minSpeed + "Mbps" : ""} · 用时 ${h.elapsed}s · 返回 ${h.count} 个</div>
-        </div>
+        <div class="hist-time mono">${esc(h.time)}${h.cancelled ? ' <span class="cancelled-tag">（已取消）</span>' : ""}</div>
+        <div class="hist-params">${esc(modeTxt)} · 测速 ${p.speedSecs}s/${p.speedMB}MB${p.minSpeed ? " · 下限 " + p.minSpeed + "Mbps" : ""} · 用时 ${h.elapsed}s · 返回 ${h.count} 个</div>
         <div class="hist-badges">
           <span class="hist-badge">Top ${h.count}</span>
           <span class="hist-badge">${h.results && h.results[0] ? h.results[0].mbps + " Mbps" : "—"}</span>
@@ -335,8 +355,8 @@ function refreshHistory() {
         state.mode = p.mode === "DC" ? "DC" : "RANDOM";
         state.colo = p.colo || "";
         state.randomCount = p.randomCount || 150;
-        state.speedSecs = p.speedSecs || 8;
-        state.speedMB = p.speedMB || 50;
+        state.speedSecs = p.speedSecs || 5;
+        state.speedMB = p.speedMB || 5;
         state.minSpeed = p.minSpeed || 0;
         setMode(state.mode);
         $("#selDC").value = state.colo;
@@ -347,6 +367,13 @@ function refreshHistory() {
         ["#inRandCount", "#inSecs", "#inMB"].forEach((id) => {
           const el = $(id);
           el.dispatchEvent(new Event("input"));
+        });
+        // 预设高亮：参数与某预设一致时点亮，否则都不亮
+        $$(".preset").forEach((b) => {
+          const on = (b.id === "preFast" && state.speedSecs === 5 && state.speedMB === 5 && state.minSpeed === 0)
+            || (b.id === "preAcc" && state.speedSecs === 15 && state.speedMB === 10 && state.minSpeed === 50);
+          b.classList.toggle("on", on);
+          b.setAttribute("aria-checked", on);
         });
         toast("已复用参数", "ok");
       };
@@ -368,7 +395,7 @@ function refreshHistory() {
   }).catch(() => {});
 }
 
-/* ═══ IP 池管理 ═══ */
+/* ═══ IP 池管理（抽屉内）═══ */
 
 function refreshPools() {
   api("/api/pools").then((list) => {
@@ -417,7 +444,7 @@ function refreshPools() {
   }).catch(() => {});
 }
 
-/* ═══ 系统信息 ═══ */
+/* ═══ 系统信息（抽屉内）═══ */
 
 function openInfo() {
   api("/api/data-status").then((d) => {
@@ -425,19 +452,46 @@ function openInfo() {
       <div class="info-kv">
         <div class="kv"><span>版本</span><b class="mono">v${d.version}</b></div>
         <div class="kv"><span>Python</span><b class="mono">${d.python}</b></div>
-        <div class="kv"><span>数据目录</span><b class="mono" style="word-break:break-all">${esc(d.data_dir)}</b></div>
+        <div class="kv"><span>数据目录</span><b class="mono">${esc(d.data_dir)}</b></div>
         <div class="kv"><span>官方 CF 段</span><b class="mono">${d.cf_cidrs} 条（${d.cf_ts ? fmtAgo(d.cf_ts) : "未获取"}）</b></div>
         <div class="kv"><span>外部 443 清单</span><b class="mono">${d.ext_ips ? d.ext_ips.toLocaleString() : 0} 条（${d.ext_ts ? fmtAgo(d.ext_ts) : "未获取"}）</b></div>
         <div class="kv"><span>IP 池</span><b class="mono">${d.pool_dc} 节点 / ${d.pool_ips} IP${d.pool_expired ? "（已过期）" : ""}</b></div>
         <div class="kv"><span>已知节点</span><b class="mono">${d.colo_count}</b></div>
         <div class="kv"><span>当前扫描</span><b>${d.running ? "运行中" : "空闲"}</b></div>
+        <div class="kv"><span>网络</span><b>全部流量直连（启动时清除代理）</b></div>
       </div>
       <p class="hint" style="margin-top:12px">
-        固定口径：IPv4 · 443/TLS · 结果 5 个 · 全部流量直连（启动时清除代理环境变量）。<br>
+        固定口径：IPv4 · 443/TLS · 结果 5 个。<br>
         数据源：cloudflare.com/ips-v4（官方段）+ zip.cm.edu.kg/all.txt（外部 443 清单，7 天缓存）。
       </p>`;
-    $("#infoModal").hidden = false;
   }).catch(() => {});
+}
+
+/* ═══ 抽屉 ═══ */
+
+function openDrawer(tab) {
+  const mask = $("#drawerMask"), drawer = $("#drawer");
+  // 曾被 closeDrawer 移除 → 恢复进 DOM（节点引用一直在，innerHTML 不丢失）
+  if (!mask.parentNode) document.body.appendChild(mask);
+  if (!drawer.parentNode) document.body.appendChild(drawer);
+  mask.hidden = false;
+  drawer.hidden = false;
+  if (tab) switchDrawerTab(tab);
+  if (tab === "pools") refreshPools();
+  if (tab === "info") openInfo();
+}
+
+function closeDrawer() {
+  // 必须把 mask 与面板一起移出 DOM（而非仅 hidden）：
+  // 两者都是 position:fixed，留着会拦截指针事件、挡住页面点击
+  const m = $("#drawerMask"), d = $("#drawer");
+  if (m.parentNode) m.remove();
+  if (d.parentNode) d.remove();
+}
+
+function switchDrawerTab(name) {
+  $$(".dtab").forEach((b) => b.classList.toggle("on", b.dataset.dtab === name));
+  $$(".dpanel").forEach((p) => p.classList.toggle("show", p.id === "dp" + name.charAt(0).toUpperCase() + name.slice(1)));
 }
 
 /* ═══ 扫描控制 ═══ */
@@ -452,6 +506,7 @@ function startScan() {
   }
   localLogs = [];
   renderLogsFull();
+  $("#throttleNote").hidden = true;
   api("/api/scan", {
     method: "POST", headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -473,10 +528,14 @@ function initControls() {
   $("#dcSearch").oninput = () => fillDCSelect($("#dcSearch").value);
   bindRange("#inRandCount", "randomCount", "#valRand", [10, 2000]);
   bindRange("#inSecs", "speedSecs", "#valSecs", [3, 60]);
-  bindRange("#inMB", "speedMB", "#valMB", [1, 1000]);
+  bindRange("#inMB", "speedMB", "#valMB", [1, 20]);
   $("#inMinSpeed").onchange = () => {
     state.minSpeed = Math.max(0, Math.min(10000, +$("#inMinSpeed").value || 0));
   };
+  // 预设
+  $("#preFast").onclick = () => applyPreset("fast");
+  $("#preAcc").onclick = () => applyPreset("acc");
+  // 扫描
   $("#btnScan").onclick = startScan;
   $("#btnCancel").onclick = async () => {
     if (!confirm("确定取消当前扫描？（保留已测出的部分结果）")) return;
@@ -493,11 +552,6 @@ function initControls() {
     };
   });
   // 结果排序
-  $("#resSort").onchange = () => {
-    resSortKey = $("#resSort").value;
-    resSortAsc = true;
-    renderResults();
-  };
   $$("#resTable th.sortable").forEach((th) => {
     th.onclick = () => {
       const k = th.dataset.k;
@@ -527,10 +581,19 @@ function initControls() {
       refreshHistory();
     } catch (e) { toast(e.message, "err"); }
   };
-  // IP 池弹窗
-  $("#btnPools").onclick = () => { $("#poolsModal").hidden = false; refreshPools(); };
-  $("#btnClosePools").onclick = () => { $("#poolsModal").hidden = true; };
-  $("#poolsModal").onclick = (e) => { if (e.target.id === "poolsModal") $("#poolsModal").hidden = true; };
+  // 抽屉
+  $("#btnDrawer").onclick = () => openDrawer("pools");
+  $("#btnCloseDrawer").onclick = closeDrawer;
+  $("#drawerMask").onclick = closeDrawer;
+  document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeDrawer(); });
+  $$(".dtab").forEach((b) => {
+    b.onclick = () => {
+      switchDrawerTab(b.dataset.dtab);
+      if (b.dataset.dtab === "pools") refreshPools();
+      if (b.dataset.dtab === "info") openInfo();
+    };
+  });
+  // IP 池（抽屉内）
   $("#btnPoolAdd").onclick = async () => {
     const ips = $("#poolIps").value;
     const code = $("#poolDC").value;
@@ -566,21 +629,17 @@ function initControls() {
       refreshPools(); refreshDataStatus();
     } catch (e) { toast(e.message, "err"); }
   };
-  // 系统信息
-  $("#btnInfo").onclick = openInfo;
-  $("#btnCloseInfo").onclick = () => { $("#infoModal").hidden = true; };
-  $("#infoModal").onclick = (e) => { if (e.target.id === "infoModal") $("#infoModal").hidden = true; }
 }
 
 function init() {
   initControls();
   setMode(state.mode);
+  applyPreset("fast");
   refreshColos();
   refreshDataStatus();
   refreshHistory();
   loadLatest();
   openSSE();
-  // 若服务启动时扫描已在运行（刷新页面场景），SSE 首帧即携带当前状态
   // 数据状态低频刷新（扫描进行中由 SSE 携带池统计，无需轮询）
   setInterval(() => {
     if (!$("#runInd").classList.contains("busy")) refreshDataStatus();

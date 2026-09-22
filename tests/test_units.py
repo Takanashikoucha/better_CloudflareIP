@@ -259,6 +259,7 @@ def _mock_ctx():
         "cfRay": "x-LAX-1", "location": "US·Los Angeles"}
     ctx.ping = lambda ip, times=4, timeout=2: (12, 0.0)
     ctx.ping_probe = lambda ip, timeout=2: (True, 12)
+    ctx.speed_gap = 0  # 离线测试免真实 sleep（生产默认 config.SPEED_GAP=0.5s）
     return ctx
 
 

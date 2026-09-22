@@ -26,8 +26,14 @@ _SSL_CTX = None
 _ssl_lock = threading.Lock()
 
 # 429 退避：进程级（同一 IP 被限速后，后续连接先等待再试）
+# 两级冷却：短冷却（按 Retry-After，上限 30s，单连接重试前等待）
+#          + 长冷却（10s 起步、指数递增、上限 60s，跨 IP 的全局冷静期，
+#            避免 4 个并发 IP 轮番撞限速；被取消可打断）
 _throttle_lock = threading.Lock()
 _throttle_until = 0.0
+_calm_until = 0.0
+_calm_steps = 0
+_throttle_hits = 0  # 进程累计 429 次数（供扫描器检测"本次是否遭遇限速"）
 
 
 def _ssl_ctx() -> ssl.SSLContext:
@@ -56,11 +62,40 @@ def _throttle_wait(is_cancelled=None) -> bool:
         time.sleep(min(remain, 1.0))
 
 
-def _throttle_set(retry_after: float):
-    """记录 429 限速，设置冷却期（上限 30s，避免 Retry-After 异常值拖死扫描）。"""
-    global _throttle_until
+def throttle_hits() -> int:
+    """进程累计 429 次数（单调递增）。"""
     with _throttle_lock:
+        return _throttle_hits
+
+
+def _throttle_set(retry_after: float):
+    """记录 429 限速：短冷却（Retry-After，上限 30s）+ 长冷却（全局冷静，
+    10s 起步、每遇一次 429 翻倍、上限 60s；避免并发 IP 轮番撞限速）。"""
+    global _throttle_until, _calm_until, _calm_steps, _throttle_hits
+    with _throttle_lock:
+        _throttle_hits += 1
         _throttle_until = max(_throttle_until, time.monotonic() + min(retry_after, 30.0))
+        _calm_steps = min(_calm_steps + 1, 3)
+        _calm_until = max(_calm_until, time.monotonic() + min(10.0 * (2 ** (_calm_steps - 1)), 60.0))
+
+
+def _calm_reset():
+    """成功测出一个 IP 后重置长冷却（限速解除，冷静期逐步退回基线）。"""
+    global _calm_steps
+    with _throttle_lock:
+        _calm_steps = max(0, _calm_steps - 1)
+
+
+def _calm_wait(is_cancelled=None) -> bool:
+    """长冷却等待（可被取消打断）。返回 True = 已被取消，应放弃本次连接。"""
+    while True:
+        with _throttle_lock:
+            remain = _calm_until - time.monotonic()
+        if remain <= 0:
+            return False
+        if is_cancelled and is_cancelled():
+            return True
+        time.sleep(min(remain, 1.0))
 
 
 def parse_cf_headers(head_bytes: bytes) -> dict:
@@ -131,6 +166,8 @@ def _open_conn(ip: str, speed_bytes: int, result: dict, conn_idx: int,
     """
     for attempt in range(2):
         if is_cancelled and is_cancelled():
+            raise RuntimeError("cancelled")
+        if _calm_wait(is_cancelled):
             raise RuntimeError("cancelled")
         if attempt > 0 and _throttle_wait(is_cancelled):
             raise RuntimeError("cancelled")
@@ -322,4 +359,7 @@ def speed_test(ip: str, speed_bytes: int, speed_secs: float,
             if result["mbps"] > 0:
                 break  # 重试成功，停止
 
+    # 成功 → 重置长冷却（限速压力解除）
+    if result["mbps"] > 0:
+        _calm_reset()
     return result

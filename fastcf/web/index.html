@@ -4,57 +4,50 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>FastCF · Cloudflare IP 优选</title>
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23a3e635'/%3E%3Ctext x='16' y='21' font-size='13' font-family='monospace' font-weight='bold' fill='%231a2e05' text-anchor='middle'%3Ecf%3C/text%3E%3C/svg%3E">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%230d9488'/%3E%3Ctext x='16' y='21' font-size='13' font-family='monospace' font-weight='bold' fill='%23ecfdf5' text-anchor='middle'%3Ecf%3C/text%3E%3C/svg%3E">
 <link rel="stylesheet" href="/style.css">
 </head>
 <body>
-<div class="bg-grid" aria-hidden="true"></div>
-
 <div class="wrap">
+
   <!-- ══ Header ══ -->
   <header class="appbar">
     <div class="brand">
       <div class="logo">cf</div>
       <div class="brand-txt">
         <h1>FastCF</h1>
-        <small>Cloudflare IP 优选 · IPv4 · 443/TLS · 直连</small>
+        <small>Cloudflare IP 优选 · IPv4 · 443/TLS</small>
       </div>
     </div>
     <div class="appbar-right">
-      <div class="run-ind" id="runInd" title="当前状态">
-        <span class="run-dot" id="runDot"></span><span id="runTxt">空闲</span>
+      <span class="pill" id="directPill" title="测速流量直连：启动时已清除全部代理环境变量">
+        <span class="pill-dot"></span>直连
+      </span>
+      <div class="pill run-pill" id="runInd" title="当前状态">
+        <span class="pill-dot" id="runDot"></span><span id="runTxt">空闲</span>
       </div>
-      <button class="icon-btn" id="btnPools" title="IP 池管理" aria-label="IP 池管理">
-        <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14c0 1.7 4 3 9 3s9-1.3 9-3V5"/><path d="M3 12c0 1.7 4 3 9 3s9-1.3 9-3"/></svg>
-      </button>
-      <button class="icon-btn" id="btnInfo" title="系统信息" aria-label="系统信息">
-        <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><line x1="12" y1="11" x2="12" y2="16"/><circle cx="12" cy="8" r="0.6" fill="currentColor" stroke="none"/></svg>
+      <button class="icon-btn" id="btnDrawer" title="更多（历史 / IP 池 / 系统信息）" aria-label="更多">
+        <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/><circle cx="5" cy="12" r="1"/></svg>
       </button>
     </div>
   </header>
 
-  <!-- ══ 数据状态条（KPI 卡）══ -->
-  <div class="kpis">
-    <div class="kpi">
-      <span class="kpi-label">官方 CF 段</span>
-      <b class="kpi-val mono" id="stCidr">—</b>
-      <small class="kpi-sub" id="stCidrSub">cloudflare.com/ips-v4</small>
-    </div>
-    <div class="kpi">
-      <span class="kpi-label">外部清单（443）</span>
-      <b class="kpi-val mono" id="stExt">—</b>
-      <small class="kpi-sub" id="stExtSub">zip.cm.edu.kg/all.txt</small>
-    </div>
-    <div class="kpi">
-      <span class="kpi-label">IP 池</span>
-      <b class="kpi-val mono" id="stPool">—</b>
-      <small class="kpi-sub" id="stPoolSub">节点 / IP 数</small>
-    </div>
-    <div class="kpi">
-      <span class="kpi-label">已知节点</span>
-      <b class="kpi-val mono" id="stColo">—</b>
-      <small class="kpi-sub" id="stVer"></small>
-    </div>
+  <!-- ══ 状态条（数据源 + 池 + 版本，单行紧凑）══ -->
+  <div class="statbar" id="statbar">
+    <span class="stat" id="stSrc" title="官方 CF 段 + 外部 443 清单（7 天缓存）">
+      <span class="stat-k">数据源</span><b class="stat-v mono" id="stSrcVal">…</b>
+      <span class="stat-flag" id="stSrcFlag"></span>
+    </span>
+    <span class="sep"></span>
+    <span class="stat" title="已验证可直连的 IP 池（按节点）">
+      <span class="stat-k">IP 池</span><b class="stat-v mono" id="stPool">…</b>
+    </span>
+    <span class="sep"></span>
+    <span class="stat">
+      <span class="stat-k">节点</span><b class="stat-v mono" id="stColo">…</b>
+    </span>
+    <span class="spacer"></span>
+    <span class="ver mono" id="stVer">…</span>
   </div>
 
   <div class="layout">
@@ -78,38 +71,57 @@
           <div class="selectwrap">
             <select id="selDC"><option value="">— 请选择节点 —</option></select>
           </div>
-          <div class="hint">指定节点：测该节点的 IP 池（池为空或达标不足 5 个时自动回退全局随机补齐）</div>
+          <div class="hint">池为空或达标不足 5 个时，自动回退全局随机补齐</div>
         </div>
 
         <div class="field" id="fRand" hidden>
           <label>随机 IP 数量 <span class="numval" id="valRand">150</span></label>
           <input type="range" id="inRandCount" value="150" min="10" max="2000" step="10">
-          <div class="hint">官方 ips-v4 段 + 外部 443 清单各取约一半，合并随机采样</div>
+          <div class="hint">官方 ips-v4 段 + 外部 443 清单合并随机采样</div>
         </div>
 
-        <div class="field-row">
+        <!-- 测速预设：快速 / 精准 -->
+        <div class="presets" role="radiogroup" aria-label="测速预设">
+          <button class="preset on" id="preFast" data-quick="1" role="radio" aria-checked="true">
+            <b>快速</b><small>5s · 5MB · 下限 0</small>
+          </button>
+          <button class="preset" id="preAcc" data-quick="0" role="radio" aria-checked="false">
+            <b>精准</b><small>15s · 10MB · 下限 50</small>
+          </button>
+        </div>
+
+        <!-- 高级选项（折叠）-->
+        <details class="adv">
+          <summary>高级选项</summary>
           <div class="field">
-            <label>测速时长（秒）<span class="numval" id="valSecs">8</span></label>
-            <input type="range" id="inSecs" value="8" min="3" max="60" step="1">
+            <label>测速时长（秒）<span class="numval" id="valSecs">5</span></label>
+            <input type="range" id="inSecs" value="5" min="3" max="60" step="1">
           </div>
           <div class="field">
             <label>测速流量（MB）<span class="numval" id="valMB">5</span></label>
-            <input type="range" id="inMB" value="5" min="1" max="1000" step="1">
-            <div class="hint">CF 限速阈值约 5MB；超过易触发 429（自动退避重试）</div>
+            <input type="range" id="inMB" value="5" min="1" max="20" step="1">
+            <div class="hint">上限 20MB（流量预算）；CF 限速阈值约 5MB，超限自动退避</div>
+          </div>
+          <div class="field">
+            <label>速度下限（Mbps）</label>
+            <input type="number" id="inMinSpeed" value="0" min="0" max="10000" step="10">
+            <div class="hint">凑够 5 个达标 IP 即提前停止；0 = 任何速度 &gt;0 都算达标</div>
+          </div>
+        </details>
+
+        <div class="gfw-note" id="gfwNote" hidden>
+          <span class="gfw-ico">!</span>
+          <div class="gfw-txt">
+            <b>中国大陆网络提示</b>
+            <small>检测到速度 &lt; 10 Mbps，可能受 GFW 影响。预期：10-40 Mbps（多连接）；海外 100+ Mbps。</small>
           </div>
         </div>
 
-        <div class="field">
-          <label>速度下限（Mbps）</label>
-          <input type="number" id="inMinSpeed" value="0" min="0" max="10000" step="10">
-          <div class="hint">凑够 5 个达标 IP 即提前停止；0 = 任何速度 &gt;0 都算达标</div>
-        </div>
-
-        <div class="gfw-note" id="gfwNote" hidden>
-          <span class="gfw-ico">⚠</span>
+        <div class="throttle-note" id="throttleNote" hidden>
+          <span class="gfw-ico">!</span>
           <div class="gfw-txt">
-            <b>中国大陆网络提示</b>
-            <small>检测到速度 &lt; 10 Mbps，可能受 GFW 影响。中国大陆预期：10-40 Mbps（多连接）；海外预期：100+ Mbps。如需准确测速，建议使用海外 VPS。</small>
+            <b>已触发 Cloudflare 限速（429）</b>
+            <small>已自动退避。建议稍后重试，或减小测速流量 / 缩短时长。</small>
           </div>
         </div>
 
@@ -147,11 +159,6 @@
           <button class="tab-btn on" data-tab="results">优选结果</button>
           <button class="tab-btn" data-tab="history">历史记录</button>
           <div class="tabbar-ops">
-            <select id="resSort" class="mini-select" title="排序">
-              <option value="ping">延迟</option>
-              <option value="loss">丢包</option>
-              <option value="mbps">速度</option>
-            </select>
             <button class="btn-ghost" id="btnDlCsv" title="导出当前结果为 CSV">
               <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M4 19h16"/></svg>
               CSV
@@ -163,19 +170,18 @@
           <div class="tablewrap">
             <table id="resTable">
               <thead><tr>
-                <th data-k="rank" class="w-n">Rank</th>
+                <th data-k="rank" class="w-n">#</th>
                 <th data-k="ip">IP 地址</th>
-                <th data-k="dc">数据中心</th>
-                <th data-k="ping" class="sortable on">ping 延迟</th>
-                <th data-k="loss" class="sortable">丢包率</th>
-                <th data-k="mbps" class="sortable">峰值速度</th>
+                <th data-k="dc">节点</th>
+                <th data-k="ping" class="sortable on">延迟</th>
+                <th data-k="mbps" class="sortable">速度</th>
                 <th class="w-act"></th>
               </tr></thead>
               <tbody id="resBody"></tbody>
             </table>
             <div class="empty" id="resEmpty" hidden>
-              <div class="empty-ico">⌁</div>
-              <p>暂无结果 — 设置左侧参数后点击「开始优选」</p>
+              <div class="empty-ico">~</div>
+              <p>暂无结果 — 选择模式后点击「开始优选」</p>
             </div>
           </div>
         </div>
@@ -189,58 +195,56 @@
         </div>
       </section>
 
-      <footer class="foot">FastCF v__VERSION__ · 数据源：cloudflare.com/ips-v4 + zip.cm.edu.kg/all.txt（443 端口）· Netrvin colo 参考 · speed.cloudflare.com · 全部流量直连</footer>
+      <footer class="foot">FastCF v__VERSION__ · 数据源：cloudflare.com/ips-v4 + zip.cm.edu.kg/all.txt · speed.cloudflare.com · 全部流量直连（启动时清除代理）</footer>
     </main>
   </div>
 </div>
 
-<!-- ══ IP 池管理弹窗 ══ -->
-<div class="modal-mask" id="poolsModal" hidden>
-  <div class="modal" role="dialog" aria-modal="true" aria-label="IP 池管理">
-    <div class="modal-head">
-      <h3>IP 池管理</h3>
-      <button class="icon-btn" id="btnClosePools" aria-label="关闭">✕</button>
-    </div>
-    <div class="modal-body">
-      <p class="hint">
-        每个节点（DC）缓存已验证可直连的 IPv4（上限 50/节点 · 7 天有效期 · 过期后指定节点扫描时事件性重验）。
-        入池途径：手动探测添加 / 随机 IP 测速前探测 / 测速成功回写。
-        入池校验：IP 必须属于<b>官方 CF 段</b>或<b>外部 443 清单</b>，再拨号读 <code>cf-meta-colo</code> 按实际节点归池。
-      </p>
-      <div class="row">
-        <div class="field grow">
-          <label>IPv4 列表（每行一个，支持批量）</label>
-          <textarea id="poolIps" rows="3" placeholder="104.16.13.35&#10;172.67.0.1"></textarea>
-          <div class="hint">留空节点时，IP 按探测到的实际 colo 归入对应节点池</div>
-        </div>
-        <div class="field">
-          <label>目标节点（可选）</label>
-          <div class="selectwrap">
-            <select id="poolDC"><option value="">— 按实际 colo —</option></select>
-          </div>
-        </div>
-        <button class="btn-primary" id="btnPoolAdd">＋ 探测并入池</button>
-      </div>
-      <pre id="poolProbeResult" class="probe-res mono" hidden></pre>
-      <div class="row spread">
-        <span class="hint" id="poolStats"></span>
-        <button class="btn-ghost danger" id="btnPoolClearAll">清空全部池</button>
-      </div>
-      <div class="pool-list" id="poolList"></div>
-    </div>
+<!-- ══ 抽屉：IP 池 / 系统信息（初始隐藏；打开时恢复进 DOM，关闭时移出 DOM）══ -->
+<div class="drawer-mask" id="drawerMask" hidden></div>
+<aside class="drawer" id="drawer" hidden aria-label="更多面板">
+  <div class="drawer-head">
+    <h3>更多</h3>
+    <button class="icon-btn" id="btnCloseDrawer" aria-label="关闭">
+      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="6" y1="6" x2="18" y2="18"/><line x1="18" y1="6" x2="6" y2="18"/></svg>
+    </button>
   </div>
-</div>
+  <div class="drawer-tabs">
+    <button class="dtab on" data-dtab="pools">IP 池</button>
+    <button class="dtab" data-dtab="info">系统信息</button>
+  </div>
 
-<!-- ══ 系统信息弹窗 ══ -->
-<div class="modal-mask" id="infoModal" hidden>
-  <div class="modal narrow" role="dialog" aria-modal="true" aria-label="系统信息">
-    <div class="modal-head">
-      <h3>系统信息</h3>
-      <button class="icon-btn" id="btnCloseInfo" aria-label="关闭">✕</button>
+  <div class="dpanel show" id="dpPools">
+    <p class="hint">
+      每个节点（DC）缓存已验证可直连的 IPv4（上限 50/节点 · 7 天有效期 · 过期后指定节点扫描时事件性重验）。
+      入池途径：手动探测添加 / 随机 IP 测速前探测 / 测速成功回写。
+    </p>
+    <div class="row">
+      <div class="field grow">
+        <label>IPv4 列表（每行一个，支持批量）</label>
+        <textarea id="poolIps" rows="3" placeholder="104.16.13.35&#10;172.67.0.1"></textarea>
+        <div class="hint">留空节点时，IP 按探测到的实际 colo 归入对应节点池</div>
+      </div>
+      <div class="field">
+        <label>目标节点（可选）</label>
+        <div class="selectwrap">
+          <select id="poolDC"><option value="">— 按实际 colo —</option></select>
+        </div>
+      </div>
+      <button class="btn-primary" id="btnPoolAdd">＋ 探测并入池</button>
     </div>
-    <div class="modal-body" id="infoBody"></div>
+    <pre id="poolProbeResult" class="probe-res mono" hidden></pre>
+    <div class="row spread">
+      <span class="hint" id="poolStats"></span>
+      <button class="btn-ghost danger" id="btnPoolClearAll">清空全部池</button>
+    </div>
+    <div class="pool-list" id="poolList"></div>
   </div>
-</div>
+
+  <div class="dpanel" id="dpInfo">
+    <div id="infoBody"></div>
+  </div>
+</aside>
 
 <div class="toast" id="toast" role="status"></div>
 <script src="/app.js"></script>

@@ -236,6 +236,8 @@ def api_stream():
                     # 池统计随状态流实时下发（否则前端定时刷新会让池数"卡住"）
                     "pool_dc": len(rep),
                     "pool_ips": sum(rep.values()),
+                    # 429 限速状态透出（前端据此提示"已自动退避"）
+                    "throttled": bool(getattr(sc, "throttled", False)),
                 }
                 yield b"data: " + json.dumps(s, ensure_ascii=False).encode() + b"\n\n"
                 if item.get("stage") in ("done", "error") and not item.get("running"):

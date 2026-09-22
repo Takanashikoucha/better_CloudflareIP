@@ -99,11 +99,19 @@ def fetch_external_ips(force: bool = False) -> dict:
 
 
 def sources_status() -> dict:
-    """两源缓存概要（不触网）：供前端数据状态展示。"""
+    """两源缓存概要（不触网）：供前端数据状态展示。
+
+    health 语义：fresh（TTL 内）/ stale（有旧缓存但已过期）/ missing（无任何缓存）。
+    """
+    import time as _time
     def _info(path) -> dict:
         d = store.read_json(path, {})
-        return {"n": len(d.get("v4", [])), "ts": d.get("ts", 0),
-                "source": d.get("source", "")}
+        ts = d.get("ts", 0)
+        age = _time.time() - ts if ts else 0
+        health = "fresh" if (ts and age <= config.CACHE_TTL) else (
+            "stale" if ts else "missing")
+        return {"n": len(d.get("v4", [])), "ts": ts,
+                "source": d.get("source", ""), "health": health}
     return {"official": _info(store.CF_IPS_CACHE), "external": _info(store.EXT_IPS_CACHE)}
 
 

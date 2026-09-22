@@ -4,7 +4,47 @@
 
 ## 当前状态
 
-**已完成**：v5.1.0 性能与稳健性提升（测速 0 Mbps 根因修复 + 429 限速处理 + 取消/状态显示一致性 + 锁竞争修复）。
+**已完成**：v6.0.0 彻底重构（UI 简化 + 浅色极简设计 + Cloudflare 限速保护强化，参考 6ird/tools/cfip 的 IP 源与测速口径）。
+
+**v6.0.0 变更**：
+
+1. **前端彻底重构（web/ 三件套）**：
+   - 布局简化：4 张 KPI 卡 → 单行数据状态条（数据源/池/节点/版本 + 源健康标记 fresh/stale/missing）
+   - 控件简化：5 个滑杆 → 2 个预设按钮（快速 5s/5MB/下限0 · 精准 15s/10MB/下限50）+ 高级选项折叠
+   - 结果表 7 列 → 5 列（#/IP/节点/延迟/速度）；历史/IP 池/系统信息收进右侧抽屉（Esc 关闭）
+   - 新增「直连」状态胶囊（明示测速流量不走代理）+ 429 限速提示条（SSE throttled 透出）
+   - 配色（color-expert 方法论）：浅色极简 Linear 式；OKLCH 令牌 + teal 单一强调
+     （oklch(55% 0.13 185)，与状态色 绿/琥珀/红 色相分离）+ color-mix(in oklab) 派生
+     + 明度分层可读性 + 60-30-10 + 形状一致性锁定 + prefers-reduced-motion 支持
+   - 修掉旧版深色主题与 README 描述的长期不一致
+
+2. **Cloudflare 限速保护强化（speedtest.py / scanner.py / config.py）**：
+   - 单 IP 流量预算：min(设定流量, 20MB)（SPEED_BUDGET_MB）
+   - 相邻 IP 测速间隙 0.5s（SPEED_GAP），压低持续速率
+   - 429 双层退避：原有 Retry-After 短冷却（≤30s）+ 新增全局冷静期
+     （10s 起步、每遇一次 429 翻倍、≤60s、成功 IP 递减复位），避免 4 并发 IP 轮番撞限速
+   - 429 状态透出：scanner.throttled → SSE → 前端红色提示条 + 日志警告
+   - 前端测速流量滑杆上限 1000MB → 20MB（与预算对齐）
+
+3. **后端小幅增强**：
+   - `sources.sources_status()` 增加 `health` 字段（fresh/stale/missing）
+   - `/api/data-status` 增加 `src_health_official` / `src_health_external`
+   - 版本号 5.1.0 → 6.0.0
+
+**参考站调研结论（6ird/tools/cfip）**：
+- IP 源 = 官方 cloudflare.com/ips-v4 CIDR × 每段 N 样本（无外部清单）
+- 测速 = TCP 连接延迟(ms) + TLS 下载速度(Mbps)，支持自定义测试 URL，支持 v4/v6
+- 采纳其「简洁流程 + 延迟/速度双指标」思路；保留本项目更强的双源合并 + ICMP 预筛 + 节点池能力
+- 去除其广告弹窗等噪音设计
+
+**端到端验证**：
+- 单元测试：29 个全部通过（`python3 tests/test_units.py`）
+- 服务启动冒烟：首页 / API 端点 / 新版本号 正常
+- 浏览器验收：桌面 + 移动视口截图（webapp-testing）
+
+## v5.1.0 变更（保留）
+
+**v5.1.0 性能与稳健性提升**（测速 0 Mbps 根因修复 + 429 限速处理 + 取消/状态显示一致性 + 锁竞争修复）。
 
 **v5.1.0 变更**：
 

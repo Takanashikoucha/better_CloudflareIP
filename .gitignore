@@ -24,3 +24,6 @@ result.csv
 # 参考项目本地 clone（不应入仓库）
 .refs/
 color-expert-skill/
+
+# Agent 运行时状态文件（不应入仓库）
+.dsh-state.md

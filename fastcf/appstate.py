@@ -114,6 +114,8 @@ class AppState:
             "cf_ts": src["official"]["ts"],
             "ext_ips": src["external"]["n"],
             "ext_ts": src["external"]["ts"],
+            "src_health_official": src["official"]["health"],
+            "src_health_external": src["external"]["health"],
             "pool_dc": len(rep),
             "pool_ips": sum(rep.values()),
             "pool_expired": pool.expired(),

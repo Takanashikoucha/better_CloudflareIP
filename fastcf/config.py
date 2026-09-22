@@ -44,6 +44,8 @@ SPEED_FAIL_STOP_SECS = 3.0    # 快速失败：前 3 秒速度 < 1 Mbps → 提�
 SPEED_FAIL_STOP_MBPS = 1      # 快速失败阈值（Mbps）
 SPEED_RETRY = 1             # 失败重试次数（0 = 不重试）
 SPEED_RETRY_DELAY = 2.0     # 重试间隔（秒）
+SPEED_GAP = 0.5           # 相邻 IP 测速间隙（秒）：压低持续速率，降低 429 概率
+SPEED_BUDGET_MB = 20      # 单 IP 总流量预算（MB）：min(设定流量, 预算)，避免大流量撞 CF 限速
 LOG_LIMIT = 1000         # 扫描日志环形缓冲上限
 
 # ── IP 池 ──

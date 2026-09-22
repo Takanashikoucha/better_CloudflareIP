@@ -32,7 +32,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from . import colos, config, pool
 from .ping import ping, ping_probe
-from .speedtest import probe_location, speed_test
+from .speedtest import probe_location, speed_test, throttle_hits
 
 
 class EngineContext:
@@ -47,6 +47,7 @@ class EngineContext:
         self.speed_test = speed_test
         self.ping = ping
         self.ping_probe = ping_probe
+        self.speed_gap = config.SPEED_GAP  # 相邻 IP 测速间隙（单测可注入 0）
 
 
 def default_context() -> EngineContext:
@@ -69,6 +70,7 @@ class Scanner:
         self._last_pct = -100
         self._log_total = 0     # 已推送日志条数（增量推送游标）
         self.elapsed = 0
+        self.throttled = False  # 本次扫描是否遭遇 429 限速（SSE 透出，前端提示）
         self.done = threading.Event()
 
     # ── 状态推送 ──
@@ -249,6 +251,8 @@ class Scanner:
             self.ctx.pool.add(dc, ip_list)
         if ok_by_dc:
             self.log(f"回写池：{', '.join(f'{dc} +{len(v)}' for dc, v in ok_by_dc.items())}")
+        if self.throttled:
+            self.log("本次扫描遭遇 429 限速（已自动退避）：建议稍后重试或减少并发", "warn")
 
         speed_results.sort(key=lambda r: (
             r.get("ping") or 10**9,
@@ -463,6 +467,9 @@ class Scanner:
             ip = r["ip"]
             if self._cancelled():
                 return None, False
+            # 限速保护：相邻 IP 测速间隙（压低持续速率，降低 429 概率）
+            if self.ctx.speed_gap > 0:
+                time.sleep(self.ctx.speed_gap)
             # 随机 IP：测速前探测实际服务节点，确认 DC 并入池（同一 worker 内串行）
             if random_pool:
                 _cc, colo_hit, _city = self.ctx.probe_location(ip)
@@ -475,8 +482,13 @@ class Scanner:
                         self.log(f"  {ip} 实际节点 {self.ctx.colos.zh(colo_hit)} ({colo_hit})（池已有）")
                 else:
                     self.log(f"  {ip} 探测未读到实际节点，继续测速", "warn")
-            res = self.ctx.speed_test(ip, speed_mb * 1024 * 1024, speed_secs,
+            # 限速保护：单 IP 总流量预算（min(设定流量, 预算)），避免大流量撞 CF 限速
+            eff_mb = min(int(speed_mb), config.SPEED_BUDGET_MB)
+            hits_before = throttle_hits()
+            res = self.ctx.speed_test(ip, eff_mb * 1024 * 1024, speed_secs,
                                       is_cancelled=self._cancelled)
+            if throttle_hits() > hits_before:
+                self.throttled = True
             res["dc_zh"] = self.ctx.colos.zh(res.get("dc", ""))
             res["loc"] = res.get("dc_zh") or res.get("location") or ""
             res["ping"] = r["ping"]
