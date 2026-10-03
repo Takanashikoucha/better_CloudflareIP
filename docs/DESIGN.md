@@ -47,7 +47,7 @@ fastcf/
   exports.py               # CSV / JSON 导出
   server.py                # FastAPI 路由 + SSE
   web/
-    index.html / style.css / app.js   # 浅色 Linear 式 UI
+    index.html / style.css / app.js / fonts/   # 荧枝 Luminous Branch UI
 tests/
   test_units.py            # 离线单元测试（不触网；FASTCF_HOME 临时目录隔离）
 ```
@@ -137,17 +137,24 @@ E. 汇总：测速成功（>0Mbps）的 IP 回写其实际 DC 池；
 
 扫描参数：`mode`(DC/RANDOM) · `colo` · `randomCount`(10–2000) · `speedSecs`(3–60) · `speedMB`(10–1000) · `minSpeed`(0–10000)。
 
-## 7. UI 设计方向（v6.0 浅色极简 · OKLCH 令牌）
+## 7. UI 设计方向（v6.1 荧枝 Luminous Branch · 深夜底 × 发光纤维 × 电蓝/绯红双色）
 
-- 浅色极简：纸白底（`oklch(98.5% 0.003 250)`）+ 白色表面 + 冷灰阶明度分层（paper/sunken/line 三级）
-- 强调色：**teal**（`oklch(55% 0.13 185)`，低饱和）——与状态色（绿 150°/琥珀 75°/红 25°）色相分离，不打架；
-  对白底对比度 ≈4.6:1（正文 4.5 达标，图形元素 3:1 远超）
-- 状态色（绿/琥珀/红）低饱和，语义清晰
-- 全部颜色 **OKLCH 令牌** + `color-mix(in oklab)` 派生 hover/soft 态（不手挑第二组 hex）
-- 60-30-10：60% 纸白底 / 30% 表面层 / 10% teal 强调（仅主按钮、进度条、运行状态点、rank-1 徽章、选中态）
-- 可读性靠**明度分层**（character-first harmony），不靠色相
-- 等宽数据字体（ui-monospace 栈）用于 IP/延迟/速度等数值
-- 形状一致性锁定：卡片/输入 10px、按钮 8px、pill/badge 全圆角
+- 设计语言：**荧枝（Luminous Branch）**——"光是唯一的材质"：一切彩色元素必带辉光（drop-shadow/box-shadow），
+  纯色平涂 = 死；辉光半径 ≈ 元素尺寸 30–50%，透明度 0.3–0.5
+- 底色：`--night1 #05070b` 深夜实底（非纯黑）+ hero 区**发光纤维画布**（区块档：canvas 2D、
+  确定性种子 seed=7、根点网格 26px、长纤维 90–240px 全随机方向、蓝/红/白三族加权交替、
+  `mix-blend-mode:screen` + 径向暗角 veil）；其余区块纯夜底 + 半透明面板（`--panel rgba(4,9,16,.82)`）
+- 色彩角色分工（禁止发明新色相）：电蓝 `--bone #7cc4ff`（~60%，标题/边框/指标值/选中态）·
+  绯红 `--red #ff4d63`（~20%，**主 CTA「开始优选」/ 告警 / 峰值 / rank-1 徽章 = 页面心跳**）·
+  青绿 `--thread #5eead4`（~10%，ok 状态/丝线/进度条）· 紫 `--purple #c9a3ff`（≤10%，稀有）
+- 状态色语义优先：ok=青绿 / warn=琥珀 `#ffb454`（荧枝无琥珀角色，语义保留）/ err=绯红
+- 文字三级：`--txt/--sub/--dim`；裸文字（直接落在纤维上）= 深色垫底阴影 + 辉光双保险
+- **键名纪律**：所有 label/eyebrow 全大写 + letter-spacing:2px + dim 色
+- 字体：**JetBrains Mono**（本地 woff2 latin 400/700/800，中文走系统等宽回退）+ PureNerdFont；
+  字重分工 800=标题/指标值、700=强调、400=正文；`font-variant-numeric:tabular-nums`
+- 形状纪律：容器 12px、控件 9px、pill 全圆角（直角 0px 与大圆角 >18px 都不是荧枝）
+- 交互（redesign 审计增强）：hover/active 态全覆盖、focus-visible 蓝色辉光环、
+  tab 下划线 → 辉光胶囊、200ms 平滑过渡、`prefers-reduced-motion` 支持
 - 布局：顶部 appbar（品牌 + **「直连」状态胶囊** + 运行状态胶囊 + 抽屉入口）→ 单行数据状态条
   （数据源/池/节点/版本，含源健康标记 fresh/stale/missing）→ 双栏
   （左：模式 + 预设 + 高级选项折叠 + 开始；右：进度/日志 + 结果/历史 tabs）

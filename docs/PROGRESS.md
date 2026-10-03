@@ -4,7 +4,27 @@
 
 ## 当前状态
 
-**已完成**：v6.0.0 彻底重构（UI 简化 + 浅色极简设计 + Cloudflare 限速保护强化，参考 6ird/tools/cfip 的 IP 源与测速口径）。
+**已完成**：v6.1.0 视觉重构（荧枝 Luminous Branch 设计语言全面替换浅色极简体系）；
+承接 v6.0.0 彻底重构（UI 简化 + Cloudflare 限速保护强化，参考 6ird/tools/cfip 的 IP 源与测速口径）。
+
+**v6.1.0 变更（视觉重构，redesign-existing-projects 审计 + 荧枝 skill 规范）**：
+
+1. **设计语言切换**：浅色极简（OKLCH/teal）→ 荧枝（深夜底 `#05070b` × 发光纤维 × 电蓝/绯红双色）
+   - 载体档位：工具型仪表盘 → 区块档（hero 区纤维画布 + 径向暗角 veil，其余区块纯夜底 + 半透明面板）
+   - 色彩角色分工：电蓝 ~60%（标题/边框/指标值/选中态）· 绯红 ~20%（主 CTA「开始优选」/告警/峰值/rank-1 = 心跳）·
+     青绿 ~10%（ok 状态/丝线/进度条）· 紫 ≤10%；warn 保留琥珀（语义优先）
+   - 凡彩色必辉光（drop-shadow/box-shadow，半径 ≈ 元素 30–50%，透明度 0.3–0.5）；
+     裸文字 = 深色垫底 + 辉光双保险；键名全大写 + letter-spacing:2px
+   - 圆角纪律：容器 12px / 控件 9px / pill 全圆角
+2. **字体**：JetBrains Mono 本地 woff2（latin 400/700/800）+ PureNerdFont，`@font-face` 本地托管（零 CDN）；
+   新增 `GET /fonts/{fname}` 路由（白名单校验防路径穿越 + Cache-Control 一年）
+3. **hero 区**：`<canvas id="fiberCanvas">` + `initFiber()` 纤维引擎（确定性种子 seed=7、
+   根点网格 26px、长纤维 90–240px 全随机方向、蓝/红/白三族加权交替、screen 混合）；
+   品牌 h1 渐变辉光文字（浅蓝→电蓝→青绿，90deg）
+4. **redesign 审计增强**：focus-visible 蓝色辉光环、tab 下划线→辉光胶囊、
+   hover/active 态全覆盖、200ms 平滑过渡、favicon 换荧枝渐变描边款、
+   footer 荧枝签名句式（`⚡ theme: fastcf luminous branch`）
+5. **DOM/class 名零改动**（app.js 逻辑不动，只换皮肤）；版本号 6.0.0 → 6.1.0
 
 **v6.0.0 变更**：
 

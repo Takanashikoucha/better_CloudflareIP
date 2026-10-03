@@ -1,6 +1,7 @@
 # FastCF — Cloudflare IP 优选测速（Linux · 直连）
 
-> **v6.0.0 彻底重构完成**（UI 简化 + 浅色极简设计 + Cloudflare 限速保护强化）：
+> **v6.1.0 视觉重构完成**（荧枝 Luminous Branch 设计语言：深夜底 × 发光纤维 × 电蓝/绯红双色；
+> 承接 v6.0.0 的 UI 简化 + Cloudflare 限速保护强化）：
 > 继续本任务前，先读取 `docs/DESIGN.md`（设计文档）与 `docs/PROGRESS.md`（进度文档）。
 
 > 基于 Python 3 + FastAPI 的 Cloudflare IP 优选工具：固定 **IPv4 · 443/TLS · 结果 5 个**，
@@ -8,7 +9,8 @@
 > 本地历史、手动 IP 池管理、CSV/JSON 导出、SSE 增量日志流。
 > 无后台扫描线程——IP 池完全靠手动添加与扫描副产品积累。
 > 所有测速流量**直连**（启动时自动清除 `http_proxy` / `https_proxy` / `all_proxy` 环境变量）。
-> UI 为浅色极简控制台风格（OKLCH 设计令牌 + teal 单一强调 + 明度分层 + 等宽数据字体）。
+> UI 为荧枝（Luminous Branch）设计语言：深夜底 + hero 区发光纤维画布（蓝×红×白交织）+
+> 电蓝主强调 / 绯红心跳 CTA + 全量辉光 + JetBrains Mono 等宽 + 本地托管字体（零 CDN）。
 
 ## 特性
 
@@ -32,9 +34,10 @@
   CF 数据中心中文名 / 归属地，按 **延迟 → 丢包 → 速度** 排序，支持按列排序
 - 📜 **本地历史** — 自动保存最近 50 次，支持查看 / 复用参数 / 删除 / 下载 CSV
 - 📤 **结果导出** — CSV（与 CFST result.csv 风格对齐）+ JSON
-- 🎨 **浅色极简控制台 UI** — OKLCH 设计令牌 + teal 单一强调（色相与状态色分离）+
-  明度分层可读性 + 等宽数据字体、双栏布局、SSE 增量日志流（logDelta）、单行数据状态条、
-  测速预设（快速/精准）+ 高级选项折叠、历史/IP 池/系统信息收进右侧抽屉、「直连」状态胶囊
+- 🎨 **荧枝（Luminous Branch）UI** — 深夜底（#05070b）+ hero 区发光纤维画布（确定性种子、蓝红白三族加权交替）
+  + 电蓝主强调 / 绯红心跳 CTA / 青绿丝线 / 稀有紫（色彩角色分工）+ 凡彩色必辉光 +
+  键名全大写纪律 + JetBrains Mono 等宽（本地 woff2，零 CDN）+ 双栏布局、SSE 增量日志流（logDelta）、
+  单行数据状态条、测速预设（快速/精准）+ 高级选项折叠、历史/IP 池/系统信息收进右侧抽屉、「直连」状态胶囊
 
 ## 快速开始
 
@@ -137,9 +140,10 @@ fastcf/
   server.py            # FastAPI 路由（静态 UI + JSON API + SSE 流）
   exports.py           # 结果导出（csv / json）
   web/
-    index.html         # UI 页面（浅色极简 · 双栏 · 抽屉收纳次要功能）
-    style.css          # 样式（OKLCH 令牌 · teal 单一强调 · 明度分层）
-    app.js             # 前端逻辑（SSE、预设、抽屉、429 提示、导出、历史、IP 池）
+    index.html         # UI 页面（荧枝 · hero 纤维画布 · 双栏 · 抽屉收纳次要功能）
+    style.css          # 样式（荧枝色板令牌 · 电蓝/绯红双色 · 辉光 · 键名纪律）
+    app.js             # 前端逻辑（SSE 流、预设、抽屉、429 提示、导出、历史、IP 池 + initFiber 纤维引擎）
+    fonts/             # 本地字体（JetBrains Mono latin woff2 + PureNerdFont）
 tests/
   test_units.py        # 离线单元测试（21 个；mock EngineContext，不触网）
 docs/

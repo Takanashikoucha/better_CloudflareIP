@@ -469,13 +469,16 @@ function openInfo() {
 
 /* ═══ 抽屉 ═══ */
 
+// 模块级节点引用：closeDrawer 用 remove() 移出 DOM 后，
+// querySelector 再也找不到节点，必须持有引用才能恢复。
+// 在 init() 里赋值（此时 DOM 已就绪）。
+let _drawerMask = null, _drawer = null;
+
 function openDrawer(tab) {
-  const mask = $("#drawerMask"), drawer = $("#drawer");
-  // 曾被 closeDrawer 移除 → 恢复进 DOM（节点引用一直在，innerHTML 不丢失）
-  if (!mask.parentNode) document.body.appendChild(mask);
-  if (!drawer.parentNode) document.body.appendChild(drawer);
-  mask.hidden = false;
-  drawer.hidden = false;
+  if (_drawerMask && !_drawerMask.parentNode) document.body.appendChild(_drawerMask);
+  if (_drawer && !_drawer.parentNode) document.body.appendChild(_drawer);
+  if (_drawerMask) _drawerMask.hidden = false;
+  if (_drawer) _drawer.hidden = false;
   if (tab) switchDrawerTab(tab);
   if (tab === "pools") refreshPools();
   if (tab === "info") openInfo();
@@ -484,9 +487,14 @@ function openDrawer(tab) {
 function closeDrawer() {
   // 必须把 mask 与面板一起移出 DOM（而非仅 hidden）：
   // 两者都是 position:fixed，留着会拦截指针事件、挡住页面点击
-  const m = $("#drawerMask"), d = $("#drawer");
-  if (m.parentNode) m.remove();
-  if (d.parentNode) d.remove();
+  if (_drawerMask && _drawerMask.parentNode) _drawerMask.remove();
+  if (_drawer && _drawer.parentNode) _drawer.remove();
+  // close 后把 dtab 复位到 IP 池——
+  // 否则停留在"系统信息"时，再次打开默认 tab=pools 会因 switchDrawerTab
+  // 的 classList.toggle 把 dpanel 的 show 移除而把 dtab 的 on 加上，
+  // 导致"信息"按钮看起来失灵（面板空 + 无高亮）
+  $$(".dtab").forEach((b) => b.classList.toggle("on", b.dataset.dtab === "pools"));
+  $$(".dpanel").forEach((p) => p.classList.toggle("show", p.id === "dpPools"));
 }
 
 function switchDrawerTab(name) {
@@ -631,7 +639,76 @@ function initControls() {
   };
 }
 
+/* ═══ 荧枝纤维画布（区块档：hero 区；确定性种子，可复现）═══ */
+
+function initFiber(cv, opts) {
+  opts = opts || {};
+  const seed = opts.seed != null ? opts.seed : 7;
+  const redBias = opts.redBias || 0;
+  let s = seed >>> 0;
+  const rnd = () => { s = (s * 1103515245 + 12345) & 0x7fffffff; return s / 0x7fffffff; };
+  const gauss = () => (rnd() + rnd() + rnd() + rnd() - 2) / 2;
+  const BLUE = ['rgba(150,215,255,1)', 'rgba(110,190,255,1)', 'rgba(185,232,255,1)', 'rgba(80,165,250,1)', 'rgba(130,205,255,1)'];
+  const RED = ['rgba(255,70,100,1)', 'rgba(255,110,110,1)', 'rgba(235,45,75,1)', 'rgba(255,140,130,1)', 'rgba(255,90,95,1)'];
+  const WHITE = ['rgba(235,250,255,1)', 'rgba(210,240,255,1)'];
+  const t1 = 0.5 + redBias, t2 = 0.82 + redBias;
+  const pickFam = (prev) => {
+    const r = rnd();
+    if (prev !== 'B' && r < t1) return 'B';
+    if (prev !== 'R' && r >= t1 && r < t2) return 'R';
+    if (prev !== 'B') return 'B';
+    if (prev !== 'R') return 'R';
+    return 'W';
+  };
+  const rect = cv.getBoundingClientRect();
+  const w = Math.max(rect.width, 1), h = Math.max(rect.height, 1);
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  cv.width = w * dpr; cv.height = h * dpr;
+  const ctx = cv.getContext('2d');
+  ctx.scale(dpr, dpr);
+  ctx.clearRect(0, 0, w, h);
+  const fiber = (x, y, a, len, color, width, alpha) => {
+    const dx = Math.cos(a), dy = Math.sin(a), px = -dy, py = dx;
+    const bow = gauss() * len * 0.25;
+    const c1x = x + dx * len * 0.33 + px * bow * 0.4, c1y = y + dy * len * 0.33 + px * bow * 0.4;
+    const c2x = x + dx * len * 0.7 + px * bow, c2y = y + dy * len * 0.7 + px * bow * 0.8;
+    const ex = x + dx * len + px * bow * 1.2, ey = y + dy * len + px * bow;
+    ctx.beginPath(); ctx.moveTo(x, y);
+    ctx.bezierCurveTo(c1x, c1y, c2x, c2y, ex, ey);
+    ctx.strokeStyle = color; ctx.lineWidth = width;
+    ctx.globalAlpha = alpha; ctx.lineCap = 'round'; ctx.stroke();
+  };
+  const STEP = 26;
+  let lastFam = 'B';
+  for (let gy = -30; gy < h + 30; gy += STEP) {
+    for (let gx = -30; gx < w + 30; gx += STEP) {
+      const n = 1 + Math.round(rnd());
+      for (let i = 0; i < n; i++) {
+        const fam = pickFam(lastFam);
+        lastFam = fam;
+        const pal = fam === 'B' ? BLUE : fam === 'R' ? RED : WHITE;
+        const a = rnd() * Math.PI * 2 + (rnd() - 0.5) * 1.1;
+        fiber(gx + (rnd() - 0.5) * 14, gy + (rnd() - 0.5) * 14, a,
+          90 + rnd() * 150, pal[Math.floor(rnd() * pal.length)],
+          4.5 + rnd() * 4.5, 0.22 + rnd() * 0.16);
+      }
+    }
+  }
+  for (let i = 0; i < 120; i++) {
+    const fam = pickFam(lastFam);
+    lastFam = fam;
+    const pal = fam === 'B' ? BLUE : fam === 'R' ? RED : WHITE;
+    const a = rnd() * Math.PI * 2;
+    fiber(rnd() * w, rnd() * h * 0.6, a, 110 + rnd() * 140,
+      pal[Math.floor(rnd() * pal.length)], 3 + rnd() * 3, 0.2 + rnd() * 0.14);
+  }
+  ctx.globalAlpha = 1;
+}
+
 function init() {
+  initFiber($("#fiberCanvas"), { seed: 7, redBias: 0 });
+  _drawerMask = document.getElementById("drawerMask");
+  _drawer = document.getElementById("drawer");
   initControls();
   setMode(state.mode);
   applyPreset("fast");
@@ -653,4 +730,9 @@ async function refreshColos() {
   } catch (e) { /* 静默 */ }
 }
 
-document.addEventListener("DOMContentLoaded", init);
+// 防御：若脚本执行时 DOMContentLoaded 已派发（某些嵌入/自动化环境），直接 init
+if (document.readyState === "loading") {
+  document.addEventListener("DOMContentLoaded", init);
+} else {
+  init();
+}

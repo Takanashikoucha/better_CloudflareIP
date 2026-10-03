@@ -4,7 +4,7 @@ import json
 import threading
 from pathlib import Path
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 from . import __version__, colos, exports, history, pool
@@ -60,6 +60,26 @@ def app_js():
 @app.get("/style.css")
 def style_css():
     return Response(_STATIC["/style.css"], media_type="text/css; charset=utf-8")
+
+
+_FONT_TYPES = {
+    ".woff2": "font/woff2",
+    ".woff": "font/woff",
+    ".ttf": "font/ttf",
+}
+
+
+@app.get("/fonts/{fname}")
+def font(fname: str):
+    # 字体文件名白名单校验（防路径穿越）
+    if "/" in fname or "\\" in fname or ".." in fname:
+        raise HTTPException(status_code=400, detail="invalid font name")
+    p = WEB_DIR / "fonts" / fname
+    if not p.is_file():
+        raise HTTPException(status_code=404, detail="font not found")
+    mt = _FONT_TYPES.get(p.suffix.lower(), "application/octet-stream")
+    return Response(p.read_bytes(), media_type=mt,
+                   headers={"Cache-Control": "public, max-age=31536000"})
 
 
 # ── 状态 / 历史 / 数据源 ──
